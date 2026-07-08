@@ -13,3 +13,13 @@ This study uses LiDAR drone datasets from 13 post-landslide locations. The input
 ## Training Dataset
 
 The model's training dataset is prepared through visual interpretation, since most landslides are partially or fully visible in the drone imagery at this resolution.
+
+## Model Research
+
+- Model 1 | Why this suits for this case? | Github Link
+- Model 2 | Why this suits for this case? | Github Link
+- Model 3 | Why this suits for this case? | Github Link
+- Model 4 | Why this suits for this case? | Github Link
+- Model 5 | Why this suits for this case? | Github Link
+
+https://github.com/Jack-bo1220/Awesome-Remote-Sensing-Foundation-Models
