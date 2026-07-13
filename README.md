@@ -8,7 +8,7 @@ The resulting model can be used to build landslide inventory datasets that docum
 
 ## Datasets
 
-This study uses LiDAR drone datasets from 13 post-landslide locations. The input data includes LiDAR point clouds and very high-resolution orthomosaics for each site.
+This study uses LiDAR drone datasets from 12 post-landslide locations. The input data includes LiDAR point clouds and very high-resolution orthomosaics for each site.
 
 ## Training Dataset
 
