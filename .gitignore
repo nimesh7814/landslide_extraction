@@ -219,3 +219,5 @@ __marimo__/
 
 # Datasets
 .data
+/data/**
+!/data/sites_manifest.csv

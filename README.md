@@ -14,12 +14,28 @@ This study uses LiDAR drone datasets from 13 post-landslide locations. The input
 
 The model's training dataset is prepared through visual interpretation, since most landslides are partially or fully visible in the drone imagery at this resolution.
 
-## Model Research
+## Create Orthomosaic Footprint Polygons
 
-- Model 1 | Why this suits for this case? | Github Link
-- Model 2 | Why this suits for this case? | Github Link
-- Model 3 | Why this suits for this case? | Github Link
-- Model 4 | Why this suits for this case? | Github Link
-- Model 5 | Why this suits for this case? | Github Link
+Create one footprint shapefile for each orthomosaic in `data`:
 
-https://github.com/Jack-bo1220/Awesome-Remote-Sensing-Foundation-Models
+```powershell
+python scripts/create_orthomosaic_boundaries.py
+```
+
+The script writes each output shapefile beside its source orthomosaic using the
+name pattern `site_<number>_footprint.shp`, for example:
+
+```text
+data/site_01_orthomosaic.tif
+data/site_01_footprint.shp
+```
+
+Each output is written in `EPSG:5235` and contains a `value` attribute set to
+`0`. By default, the script writes one outer boundary polygon for the valid
+orthomosaic footprint, excluding NoData/transparent background and removing
+internal holes or tile seams. To write simple rectangular raster extents
+instead, run:
+
+```powershell
+python scripts/create_orthomosaic_boundaries.py --mode extent
+```
