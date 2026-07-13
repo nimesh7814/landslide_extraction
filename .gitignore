@@ -219,5 +219,19 @@ __marimo__/
 
 # Datasets
 .data
-/data/**
-!/data/sites_manifest.csv
+
+# Large raster and point-cloud payloads
+/data/**/*.tif
+/data/**/*.tiff
+/data/**/*.las
+/data/**/*.laz
+
+# Raster and point-cloud sidecars (overviews, metadata, and world files)
+/data/**/*.tif.*
+/data/**/*.tiff.*
+/data/**/*.las.*
+/data/**/*.laz.*
+/data/**/*_orthomosaic.tfw
+/data/**/*_orthomosaic.prj
+/data/**/*_dtm.tfw
+/data/**/*_dtm.prj
