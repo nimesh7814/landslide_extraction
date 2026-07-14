@@ -235,3 +235,36 @@ __marimo__/
 /data/**/*_orthomosaic.prj
 /data/**/*_dtm.tfw
 /data/**/*_dtm.prj
+
+# Geospatial application caches, indexes, and temporary database files
+*.aux.xml
+*.ovr
+*.rrd
+*.qix
+*.sbn
+*.sbx
+*.qmd
+*.gpkg-wal
+*.gpkg-shm
+*.gpkg-journal
+*.gpkg.tmp
+*.qgz~
+*.qgs~
+
+# Common tool and editor caches
+.cache/
+.ipynb_checkpoints/
+.jupyter_cache/
+.idea/**/workspace.xml
+.idea/**/shelf/
+.idea/**/httpRequests/
+.vscode/.ropeproject/
+
+# Operating-system caches and metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/

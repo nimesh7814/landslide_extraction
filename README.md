@@ -39,3 +39,17 @@ instead, run:
 ```powershell
 python scripts/create_orthomosaic_boundaries.py --mode extent
 ```
+
+## Convert Shapefiles to GeoPackages
+
+Convert every shapefile under `data` to a same-named GeoPackage in `EPSG:5235`:
+
+```powershell
+python scripts/2_shapefiles_to_geopackage.py
+```
+
+For example, `data/site_01_footprint.shp` becomes
+`data/site_01_footprint.gpkg`, with a layer named `site_01_footprint`. The
+script verifies the CRS and feature count before moving the original shapefile
+bundle (`.shp`, `.dbf`, `.shx`, `.prj`, and metadata files) to `data/old`.
+Use `--input-dir` and `--archive-dir` to select different locations.
