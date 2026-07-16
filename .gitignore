@@ -268,3 +268,23 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+
+
+.claude
+CLAUDE.md
+
+# Deep-learning pipeline: derived/generated artifacts (never source data)
+# Only data_processed/splits/ (small JSON manifests) is versioned.
+data_processed/terrain_derivatives/
+data_processed/patches/
+weights/
+outputs/
+logs/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+runs/
+lightning_logs/
+mlruns/
+wandb/

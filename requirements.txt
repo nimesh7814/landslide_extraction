@@ -1,0 +1,24 @@
+# Geospatial stack (existing pipeline: scripts/0_boundaries_from_orthomosaic.py, 1_dtm_from_pointclouds.py)
+geopandas==1.1.4
+laspy==2.7.0
+numpy==2.5.1
+pyogrio==0.13.0
+pyproj==3.7.2
+rasterio==1.5.0
+scipy==1.18.0
+shapely==2.1.2
+
+# Deep learning stack (foundation-model landslide segmentation pipeline)
+# torch/torchvision are installed separately with the CUDA 13.2 index, see docs/workflow.md:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu132
+torch==2.13.0+cu132
+torchvision==0.28.0+cu132
+timm==1.0.28
+einops==0.8.2
+pyyaml==6.0.3
+tqdm==4.68.4
+scikit-learn==1.9.0
+tensorboard==2.21.0
+huggingface_hub==1.23.0
+safetensors==0.8.0
+matplotlib==3.11.0

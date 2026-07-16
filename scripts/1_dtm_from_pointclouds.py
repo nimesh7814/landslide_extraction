@@ -6,12 +6,22 @@ import geopandas as gpd
 import rasterio
 from rasterio.transform import from_origin
 from rasterio.features import geometry_mask
-from scipy.interpolate import griddata
+from scipy.spatial import cKDTree
+
+IDW_NEIGHBORS = 12  # number of nearest known cells averaged per gap cell
+IDW_POWER = 2  # inverse-distance weighting exponent
 
 data_dir = r"..\data"
 
 GROUND_CLASS = 2
-RESOLUTION = 0.1  # meters
+# Ground-point density varies a lot between sites (observed ~0.2-0.8 m natural spacing
+# across this dataset), so the grid resolution is derived per site from the actual point
+# density rather than fixed. A fixed fine resolution (e.g. 0.1 m) on a sparser site leaves
+# ~95%+ of cells with no direct measurement, which scipy.griddata then bridges with large
+# flat Delaunay-triangle planes -- visible as sharp straight-line "edge" artifacts in the
+# DTM. Matching resolution to point spacing keeps most cells directly measured.
+MIN_RESOLUTION = 0.1  # meters, never grid finer than this
+MAX_RESOLUTION = 1.0  # meters, never grid coarser than this
 
 las_files = [f for f in os.listdir(data_dir) if f.endswith(".las")]
 
@@ -71,6 +81,12 @@ for las_name in sorted(las_files):
     y = clipped.geometry.y.values
     z = clipped["z"].values
 
+    point_density = len(clipped) / boundary_geom.area  # points per m^2
+    natural_spacing = 1.0 / np.sqrt(point_density) if point_density > 0 else MAX_RESOLUTION
+    RESOLUTION = float(np.clip(round(natural_spacing, 2), MIN_RESOLUTION, MAX_RESOLUTION))
+    print(f"  Ground point density: {point_density:.2f} pts/m^2 (natural spacing "
+          f"~{natural_spacing:.2f} m) -> grid resolution {RESOLUTION} m")
+
     ncols = int(np.ceil((maxx - minx) / RESOLUTION))
     nrows = int(np.ceil((maxy - miny) / RESOLUTION))
 
@@ -96,24 +112,25 @@ for las_name in sorted(las_files):
         known_vals = dtm[filled]
         missing_rows, missing_cols = np.where(~filled)
 
-        # Linear interpolation first (smooth blending between known points)
-        linear_vals = griddata(
-            (known_rows, known_cols), known_vals,
-            (missing_rows, missing_cols), method="linear"
-        )
-
-        # Nearest-neighbor fallback only for cells linear couldn't reach
-        # (outside the convex hull of known points)
-        still_missing = np.isnan(linear_vals)
-        if np.any(still_missing):
-            nearest_vals = griddata(
-                (known_rows, known_cols), known_vals,
-                (missing_rows[still_missing], missing_cols[still_missing]),
-                method="nearest"
-            )
-            linear_vals[still_missing] = nearest_vals
-
-        dtm[missing_rows, missing_cols] = linear_vals
+        # Inverse-distance-weighted fill over the k nearest directly-measured cells.
+        # scipy.griddata's "linear" method triangulates the known points (Delaunay) and
+        # interpolates each triangle as a flat plane -- this produces visible straight-edge
+        # facets wherever a triangle spans a locally sparser patch, even after matching the
+        # grid resolution to the site's average point density. IDW blends several nearby
+        # points smoothly instead of stitching flat planes, so it has no facet edges, and
+        # naturally covers cells beyond the convex hull of known points too (no separate
+        # nearest-neighbor fallback needed).
+        known_coords = np.column_stack([known_rows, known_cols])
+        missing_coords = np.column_stack([missing_rows, missing_cols])
+        tree = cKDTree(known_coords)
+        k = min(IDW_NEIGHBORS, len(known_vals))
+        dist, idx = tree.query(missing_coords, k=k)
+        if k == 1:
+            dist = dist[:, np.newaxis]
+            idx = idx[:, np.newaxis]
+        weights = 1.0 / np.maximum(dist, 1e-6) ** IDW_POWER
+        weights /= weights.sum(axis=1, keepdims=True)
+        dtm[missing_rows, missing_cols] = np.sum(known_vals[idx] * weights, axis=1)
 
     transform = from_origin(minx, maxy, RESOLUTION, RESOLUTION)
     outside_mask = geometry_mask(

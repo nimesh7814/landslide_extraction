@@ -11,3 +11,5 @@ site_09,Makehelwala,data/site_09_orthomosaic.tif,data/site_09_pointcloud.las,dat
 site_10,Kansalagamuwa,data/site_10_orthomosaic.tif,data/site_10_pointcloud.las,data/site_10_dtm.tif,data/site_10_footprint.shp,data/site_10_landslide_annotation.shp,
 site_11,Uthuwan Kanda,data/site_11_orthomosaic.tif,data/site_11_pointcloud.las,data/site_11_dtm.tif,data/site_11_footprint.shp,data/site_11_landslide_annotation.shp,
 site_12,Victoria Reservoir,data/site_12_orthomosaic.tif,data/site_12_pointcloud.las,data/site_12_dtm.tif,data/site_12_footprint.shp,data/site_12_landslide_annotation.shp,
+,,,,,,,
+CRS: EPSG: 5235,,,,,,,

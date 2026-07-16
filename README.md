@@ -19,7 +19,7 @@ The model's training dataset is prepared through visual interpretation, since mo
 Create one footprint shapefile for each orthomosaic in `data`:
 
 ```powershell
-python scripts/create_orthomosaic_boundaries.py
+python scripts/0_boundaries_from_orthomosaic.py
 ```
 
 The script writes each output shapefile beside its source orthomosaic using the
@@ -37,19 +37,34 @@ internal holes or tile seams. To write simple rectangular raster extents
 instead, run:
 
 ```powershell
-python scripts/create_orthomosaic_boundaries.py --mode extent
+python scripts/0_boundaries_from_orthomosaic.py --mode extent
 ```
 
-## Convert Shapefiles to GeoPackages
+## Build the DTM
 
-Convert every shapefile under `data` to a same-named GeoPackage in `EPSG:5235`:
+For each site with a footprint and point cloud, build a 0.1 m digital terrain model from
+ground-classified LiDAR points:
 
 ```powershell
-python scripts/2_shapefiles_to_geopackage.py
+cd scripts
+python 1_dtm_from_pointclouds.py
 ```
 
-For example, `data/site_01_footprint.shp` becomes
-`data/site_01_footprint.gpkg`, with a layer named `site_01_footprint`. The
-script verifies the CRS and feature count before moving the original shapefile
-bundle (`.shp`, `.dbf`, `.shx`, `.prj`, and metadata files) to `data/old`.
-Use `--input-dir` and `--archive-dir` to select different locations.
+## Foundation-Model Landslide Segmentation Pipeline
+
+Beyond the raw geoprocessing above, this repo evaluates five remote-sensing foundation
+models (SkySense, DOFA, Scale-MAE, Prithvi-EO-2.0, SatMAE) for pixel-wise landslide
+segmentation, fusing orthomosaic RGB with DTM-derived terrain features. See
+[`docs/model_rationale.md`](docs/model_rationale.md) for why each model was chosen and
+[`docs/workflow.md`](docs/workflow.md) for full setup and pipeline details. Quick start:
+
+```powershell
+pip install -r requirements.txt
+pip install torch==2.13.0+cu132 torchvision==0.28.0+cu132 --index-url https://download.pytorch.org/whl/cu132
+
+python scripts/prepare_terrain_features.py
+python scripts/build_patch_dataset.py
+python scripts/train.py --config configs/dofa_frozen.yaml
+python scripts/evaluate.py --config configs/dofa_frozen.yaml
+python scripts/generate_report.py
+```
