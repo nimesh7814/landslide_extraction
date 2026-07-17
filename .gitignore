@@ -288,3 +288,6 @@ runs/
 lightning_logs/
 mlruns/
 wandb/
+
+
+models\DOFA\checkpoints\DOFA_ViT_base_e100.pth
