@@ -1,4 +1,7 @@
 import os
+os.environ.pop("PROJ_LIB", None)
+os.environ.pop("PROJ_DATA", None)
+
 import re
 import warnings
 import numpy as np
