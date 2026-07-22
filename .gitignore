@@ -221,20 +221,21 @@ __marimo__/
 .data
 
 # Large raster and point-cloud payloads
-/data/**/*.tif
-/data/**/*.tiff
-/data/**/*.las
-/data/**/*.laz
+/data/0_input/**/*.tif
+/data/0_input/**/*.tfw
+/data/0_input/**/*.tiff
+/data/0_input/**/*.las
+/data/0_input/**/*.laz
 
 # Raster and point-cloud sidecars (overviews, metadata, and world files)
-/data/**/*.tif.*
-/data/**/*.tiff.*
-/data/**/*.las.*
-/data/**/*.laz.*
-/data/**/*_orthomosaic.tfw
-/data/**/*_orthomosaic.prj
-/data/**/*_dtm.tfw
-/data/**/*_dtm.prj
+/data/0_input/**/*.tif.*
+/data/0_input/**/*.tiff.*
+/data/0_input/**/*.las.*
+/data/0_input/**/*.laz.*
+/data/0_input/**/*_orthomosaic.tfw
+/data/0_input/**/*_orthomosaic.prj
+/data/0_input/**/*_dtm.tfw
+/data/0_input/**/*_dtm.prj
 
 # Geospatial application caches, indexes, and temporary database files
 *.aux.xml
@@ -274,9 +275,9 @@ $RECYCLE.BIN/
 CLAUDE.md
 
 # Deep-learning pipeline: derived/generated artifacts (never source data)
-# Only data_processed/splits/ (small JSON manifests) is versioned.
-data_processed/terrain_derivatives/
-data_processed/patches/
+# Only data/processed/splits/ (small JSON manifests) is versioned.
+data/processed/resampled/
+data/processed/patches/
 weights/
 outputs/
 logs/
@@ -289,5 +290,4 @@ lightning_logs/
 mlruns/
 wandb/
 
-
-models\DOFA\checkpoints\DOFA_ViT_base_e100.pth
+data/1_training_dataset

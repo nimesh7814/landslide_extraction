@@ -1,0 +1,3 @@
+[submodule "models/DOFA"]
+	path = models/DOFA
+	url = https://github.com/zhu-xlab/DOFA.git

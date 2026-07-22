@@ -1,5 +1,3 @@
-"""Create one outer boundary shapefile for each orthomosaic GeoTIFF."""
-
 from __future__ import annotations
 
 import argparse
@@ -20,7 +18,8 @@ from shapely.geometry import Polygon, shape
 from shapely.ops import unary_union
 
 
-DEFAULT_RAW_DIR = Path("data")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_RAW_DIR = REPO_ROOT / "data" / "input"
 DEFAULT_TARGET_EPSG = 5235
 SHAPEFILE_EXTENSIONS = (
     ".shp",
