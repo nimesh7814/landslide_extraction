@@ -347,8 +347,39 @@ if __name__ == "__main__":
         raise RuntimeError("No trained models found under config.TRAINING_RESULTS_PATH. "
                             "Run 3_train_model.py first.")
 
+    all_rows = []
     for site_no in config.TEST_SITES:
-        predict_site(site_no, models)
+        all_rows.extend(predict_site(site_no, models))
+
+    # overall aggregate per scenario, combining confusion-matrix counts
+    # across every test site rather than averaging per-site metrics
+    overall_counts = {
+        name: {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
+        for name in models
+    }
+    for row in all_rows:
+        counts = overall_counts[row["scenario"]]
+        for key in ("tp", "fp", "fn", "tn"):
+            counts[key] += row[key]
+
+    for name, counts in overall_counts.items():
+        all_rows.append({
+            "site": "overall",
+            "scenario": name,
+            **counts,
+            **compute_metrics(**counts)
+        })
+
+    metrics_path = os.path.join(config.TEST_PREDICTIONS_PATH, "metrics.csv")
+    os.makedirs(config.TEST_PREDICTIONS_PATH, exist_ok=True)
+
+    with open(metrics_path, "w", newline="") as f:
+        fieldnames = ["site", "scenario", "tp", "fp", "fn", "tn", "accuracy", "precision", "recall", "f1"]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(all_rows)
+
+    print(f"[INFO] saved evaluation metrics -> {metrics_path}")
 
     print("\n--------------------------------")
     print("TEST SITE PREDICTION COMPLETE")
