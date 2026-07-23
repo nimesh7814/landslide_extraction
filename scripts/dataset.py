@@ -3,6 +3,7 @@ import glob
 import random
 
 import numpy as np
+import cv2
 import torch
 from torch.utils.data import Dataset
 
@@ -11,7 +12,12 @@ from config import (
     RANDOM_SAMPLE_PERCENTAGE,
     RANDOM_SEED,
     TRAIN_PERCENTAGE,
-    VALIDATION_PERCENTAGE
+    VALIDATION_PERCENTAGE,
+    AUGMENT_FLIP_PROBABILITY,
+    AUGMENT_BRIGHTNESS_PROBABILITY,
+    AUGMENT_BRIGHTNESS_RANGE,
+    AUGMENT_BLUR_PROBABILITY,
+    AUGMENT_BLUR_SIGMA_RANGE
 )
 
 assert abs(TRAIN_PERCENTAGE + VALIDATION_PERCENTAGE - 1.0) < 1e-6, (
@@ -96,6 +102,36 @@ def estimate_positive_ratio(pairs, max_samples=200, seed=RANDOM_SEED):
     return positive_pixels / total_pixels
 
 
+def _random_brightness(image):
+    """Scales pixel intensities by a random factor to simulate darker or
+    brighter conditions. Image is expected to be normalized to [0, 1]."""
+
+    factor = random.uniform(*AUGMENT_BRIGHTNESS_RANGE)
+
+    image = image * factor
+
+    return np.clip(image, 0.0, 1.0)
+
+
+def _random_blur(image):
+    """Applies a light Gaussian blur to each channel independently to
+    simulate slightly out-of-focus or lower-resolution imagery."""
+
+    sigma = random.uniform(*AUGMENT_BLUR_SIGMA_RANGE)
+
+    blurred = np.empty_like(image)
+
+    for channel_index in range(image.shape[2]):
+        blurred[:, :, channel_index] = cv2.GaussianBlur(
+            image[:, :, channel_index],
+            ksize=(0, 0),
+            sigmaX=sigma,
+            sigmaY=sigma
+        )
+
+    return blurred
+
+
 class LandslideDataset(Dataset):
     """Loads pre-tiled (image, mask) .npy pairs produced by
     1_create_train_dataset.py."""
@@ -116,13 +152,19 @@ class LandslideDataset(Dataset):
         mask = mask / 255.0
 
         if self.augment:
-            if random.random() < 0.5:
+            if random.random() < AUGMENT_FLIP_PROBABILITY:
                 image = np.flip(image, axis=1).copy()
                 mask = np.flip(mask, axis=1).copy()
 
-            if random.random() < 0.5:
+            if random.random() < AUGMENT_FLIP_PROBABILITY:
                 image = np.flip(image, axis=0).copy()
                 mask = np.flip(mask, axis=0).copy()
+
+            if random.random() < AUGMENT_BRIGHTNESS_PROBABILITY:
+                image = _random_brightness(image)
+
+            if random.random() < AUGMENT_BLUR_PROBABILITY:
+                image = _random_blur(image)
 
         image = np.transpose(image, (2, 0, 1))
 

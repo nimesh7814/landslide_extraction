@@ -6,15 +6,15 @@ import matplotlib.pyplot as plt
 
 
 def plot_training_curves(history, output_dir):
-    """Saves a 2x2 figure with train/val loss, IoU, Dice and
-    precision/recall curves for one dataset variant."""
+    """Saves a 2x3 figure with train/val loss, IoU, Dice, accuracy,
+    precision and recall curves for one dataset variant."""
 
     epochs = [row["epoch"] for row in history]
 
     def series(key):
         return [row[key] for row in history]
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(16, 8))
 
     axes[0, 0].plot(epochs, series("train_loss"), label="train")
     axes[0, 0].plot(epochs, series("val_loss"), label="val")
@@ -28,19 +28,29 @@ def plot_training_curves(history, output_dir):
     axes[0, 1].set_xlabel("Epoch")
     axes[0, 1].legend()
 
-    axes[1, 0].plot(epochs, series("train_dice"), label="train")
-    axes[1, 0].plot(epochs, series("val_dice"), label="val")
-    axes[1, 0].set_title("Dice / F1")
+    axes[0, 2].plot(epochs, series("train_dice"), label="train")
+    axes[0, 2].plot(epochs, series("val_dice"), label="val")
+    axes[0, 2].set_title("Dice / F1")
+    axes[0, 2].set_xlabel("Epoch")
+    axes[0, 2].legend()
+
+    axes[1, 0].plot(epochs, series("train_accuracy"), label="train")
+    axes[1, 0].plot(epochs, series("val_accuracy"), label="val")
+    axes[1, 0].set_title("Accuracy")
     axes[1, 0].set_xlabel("Epoch")
     axes[1, 0].legend()
 
-    axes[1, 1].plot(epochs, series("train_precision"), label="train precision")
-    axes[1, 1].plot(epochs, series("val_precision"), label="val precision")
-    axes[1, 1].plot(epochs, series("train_recall"), label="train recall", linestyle="--")
-    axes[1, 1].plot(epochs, series("val_recall"), label="val recall", linestyle="--")
-    axes[1, 1].set_title("Precision / Recall")
+    axes[1, 1].plot(epochs, series("train_precision"), label="train")
+    axes[1, 1].plot(epochs, series("val_precision"), label="val")
+    axes[1, 1].set_title("Precision")
     axes[1, 1].set_xlabel("Epoch")
     axes[1, 1].legend()
+
+    axes[1, 2].plot(epochs, series("train_recall"), label="train")
+    axes[1, 2].plot(epochs, series("val_recall"), label="val")
+    axes[1, 2].set_title("Recall")
+    axes[1, 2].set_xlabel("Epoch")
+    axes[1, 2].legend()
 
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, "training_curves.png"), dpi=150)

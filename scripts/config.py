@@ -25,6 +25,14 @@ MODEL_OUTPUT_DIR = os.path.join(
 )
 
 
+PREDICT_OUTPUT_DIR = os.path.join(
+    BASE_DIR,
+    "..",
+    "output",
+    "3_predict"
+)
+
+
 
 # SITE CONFIGURATION
 
@@ -64,8 +72,8 @@ RANDOM_SEED = 42
 
 # TRAIN VALIDATION SPLIT
 
-TRAIN_PERCENTAGE = 0.8
-VALIDATION_PERCENTAGE = 0.2
+TRAIN_PERCENTAGE = 0.7
+VALIDATION_PERCENTAGE = 0.3
 
 
 # DATASETS
@@ -89,11 +97,13 @@ DATASETS = {
 
 IMAGE_SIZE = 512
 
-BATCH_SIZE = 4
+BATCH_SIZE = 8
 
-EPOCHS = 50
+EPOCHS = 100
 
 LEARNING_RATE = 1e-4
+
+WEIGHT_DECAY = 1e-5
 
 
 
@@ -117,10 +127,33 @@ DECODER_CHANNELS = [
 ]
 
 
-BOTTLENECK_CHANNELS = 512
+BOTTLENECK_CHANNELS = 256
 
 
 OUTPUT_CHANNELS = 1
+
+
+# DATALOADER
+
+NUM_WORKERS = 4
+
+
+# =====================================================
+# AUGMENTATION PARAMETERS (applied only to the training split)
+# =====================================================
+
+AUGMENT_TRAIN = True
+
+# Random horizontal / vertical flip
+AUGMENT_FLIP_PROBABILITY = 0.5
+
+# Random brightness scaling (factor < 1 darkens, > 1 brightens)
+AUGMENT_BRIGHTNESS_PROBABILITY = 0.5
+AUGMENT_BRIGHTNESS_RANGE = (0.8, 1.2)
+
+# Random Gaussian blur
+AUGMENT_BLUR_PROBABILITY = 0.3
+AUGMENT_BLUR_SIGMA_RANGE = (0.3, 1.2)
 
 
 # DEVICE
@@ -133,5 +166,10 @@ DEVICE = (
 
 os.makedirs(
     MODEL_OUTPUT_DIR,
+    exist_ok=True
+)
+
+os.makedirs(
+    PREDICT_OUTPUT_DIR,
     exist_ok=True
 )

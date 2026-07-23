@@ -1,4 +1,5 @@
 import os
+import argparse
 from contextlib import ExitStack
 
 import cv2
@@ -32,7 +33,7 @@ OUTPUT_DIR = os.path.join(
 TARGET_SIZE = 512
 
 SITE_START = 1
-SITE_END = 10
+SITE_END = 12
 
 
 DATASETS = {
@@ -364,6 +365,60 @@ def find_best_tile_positions(files):
     )
 
     return positions
+
+
+def write_tile_index_shapefile(files, dataset_name, site_name, positions):
+    """Writes one shapefile per site with a polygon for every tile in
+    the grid, storing the tile number and center coordinates. Written
+    into the dataset variant's own 'tiles' folder so it survives
+    alongside that variant even if 'images'/'masks' are later deleted
+    to free disk space."""
+
+    orthomosaic_path = files["orthomosaic"]
+
+    tiles_dir = os.path.join(OUTPUT_DIR, dataset_name, "tiles")
+    os.makedirs(tiles_dir, exist_ok=True)
+
+    shp_path = os.path.join(tiles_dir, f"{site_name}_tiles.shp")
+
+    with rasterio.open(orthomosaic_path) as reference:
+        transform = reference.transform
+        crs = reference.crs
+
+        with shapefile.Writer(shp_path, shapeType=shapefile.POLYGON) as writer:
+            writer.field("tile_no", "N")
+            writer.field("site", "C")
+            writer.field("center_x", "F", decimal=3)
+            writer.field("center_y", "F", decimal=3)
+
+            for tile_no, (x, y) in enumerate(positions):
+                left, bottom, right, top = window_bounds(
+                    Window(x, y, TARGET_SIZE, TARGET_SIZE),
+                    transform
+                )
+
+                polygon = [
+                    (left, top),
+                    (right, top),
+                    (right, bottom),
+                    (left, bottom),
+                    (left, top)
+                ]
+
+                writer.poly([polygon])
+                writer.record(
+                    tile_no,
+                    site_name,
+                    (left + right) / 2.0,
+                    (top + bottom) / 2.0
+                )
+
+    if crs is not None:
+        prj_path = os.path.join(tiles_dir, f"{site_name}_tiles.prj")
+        with open(prj_path, "w") as prj_file:
+            prj_file.write(crs.to_wkt())
+
+    print("Saved tile index shapefile:", shp_path)
 
 
 
@@ -726,7 +781,39 @@ def create_tiles(
 
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Create tiled training datasets for one or all dataset variants."
+    )
+    parser.add_argument(
+        "--model",
+        type=int,
+        choices=[1, 2, 3, 4],
+        default=None,
+        help="Which dataset variant to create (1-4). If omitted, all variants are created."
+    )
+    return parser.parse_args()
+
+
+def select_datasets(model_number):
+    if model_number is None:
+        return DATASETS
+
+    dataset_names = list(DATASETS.keys())
+    selected_name = dataset_names[model_number - 1]
+
+    return {selected_name: DATASETS[selected_name]}
+
+
 def main():
+    args = parse_args()
+
+    datasets_to_create = select_datasets(args.model)
+
+    print("Dataset creation configuration loaded")
+    print("Tile size:", f"{TARGET_SIZE} x {TARGET_SIZE}")
+    print("Sites to process:", list(range(SITE_START, SITE_END + 1)))
+    print("Datasets to create:", list(datasets_to_create.keys()))
 
     total = 0
     normalization_cache = {}
@@ -753,7 +840,7 @@ def main():
         positions = find_best_tile_positions(files)
 
         for dataset, bands in tqdm(
-                DATASETS.items(),
+                datasets_to_create.items(),
                 desc=f"{site_name} datasets",
                 unit="dataset",
                 leave=False
@@ -772,6 +859,8 @@ def main():
                 positions,
                 normalization_cache
             )
+
+            write_tile_index_shapefile(files, dataset, site_name, positions)
 
             print(
                 "Tiles:",
