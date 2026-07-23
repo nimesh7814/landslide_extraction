@@ -1,50 +1,137 @@
-import torch
 import os
-
-
-script_dir = os.path.dirname(os.path.abspath(__file__))
-base_dir = os.path.abspath(os.path.join(script_dir, ".."))
-
-
-DATASET_PATH = os.path.join(base_dir, "data", "1_training_dataset")
-
-
-IMAGE_DATASET_PATH = os.path.join(DATASET_PATH, "imgs")
-MASK_DATASET_PATH = os.path.join(DATASET_PATH, "masks")
-
-
-TEST_SPLIT = 0.2
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-PIN_MEMORY = True if DEVICE == "cuda" else False
-
-NUM_CHANNELS = 3
-NUM_CLASSES = 1
-
-INIT_LR = 0.0001
-NUM_EPOCHS = 100
-BATCH_SIZE = 32
-
-INPUT_IMAGE_WIDTH = 128
-INPUT_IMAGE_HEIGHT = 128
+import torch
 
 
 
-BASE_OUTPUT = os.path.join(base_dir, "data", "4_output")
+# PATHS
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
 
 
-TRAINING_RESULTS_PATH = os.path.join(base_dir, "data", "2_training_results")
+DATASET_DIR = os.path.join(
+    BASE_DIR,
+    "..",
+    "output",
+    "1_training_datasets"
+)
 
 
-MODEL_PATH = os.path.join(BASE_OUTPUT, "1_training_output", "unet.pth")
-PLOT_PATH = os.path.join(BASE_OUTPUT, "1_training_output", "plot.png")
-TEST_PATHS = os.path.join(BASE_OUTPUT, "1_training_output", "test_paths.txt")
-PRED_PATHS = os.path.join(base_dir, "data", "2_predictions")
-PRED_PATHS_CONT = os.path.join(base_dir, "data", "3_continuous_predictions")
+MODEL_OUTPUT_DIR = os.path.join(
+    BASE_DIR,
+    "..",
+    "output",
+    "2_trained_model"
+)
 
 
-TEST_PREDICTIONS_PATH = os.path.join(base_dir, "data", "3_prediction")
+
+# SITE CONFIGURATION
+
+# Sites reserved only for independent testing
+# These will NOT be used during training
+TEST_SITES = [
+    11,
+    12
+]
 
 
-TEST_SITES = [11, 12]
+# Sites available for model training
+
+TRAIN_SITES = [
+    i for i in range(1,13)
+    if i not in TEST_SITES
+]
+
+
+# DATASET SAMPLING
+
+# Percentage of available training data used
+
+# 1.0 = use 100%
+# 0.5 = use 50%
+# 0.25 = use 25%
+
+RANDOM_SAMPLE_PERCENTAGE = 1.0
+
+
+
+# Random seed for reproducibility
+
+RANDOM_SEED = 42
+
+
+
+# TRAIN VALIDATION SPLIT
+
+TRAIN_PERCENTAGE = 0.8
+VALIDATION_PERCENTAGE = 0.2
+
+
+# DATASETS
+DATASETS = {
+
+    "01_ortho_dataset":3,
+
+    "02_ortho_dtm_dataset":4,
+
+    "03_ortho_dtm_hillshade_dataset":5,
+
+    "04_ortho_dtm_hillshade_slope_dataset":6
+
+}
+
+
+
+# =====================================================
+# TRAINING PARAMETERS
+# =====================================================
+
+IMAGE_SIZE = 512
+
+BATCH_SIZE = 4
+
+EPOCHS = 50
+
+LEARNING_RATE = 1e-4
+
+
+
+# =====================================================
+# MODEL PARAMETERS
+# =====================================================
+
+ENCODER_CHANNELS = [
+    16,
+    32,
+    64,
+    128
+]
+
+
+DECODER_CHANNELS = [
+    128,
+    64,
+    32,
+    16
+]
+
+
+BOTTLENECK_CHANNELS = 512
+
+
+OUTPUT_CHANNELS = 1
+
+
+# DEVICE
+DEVICE = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "cpu"
+)
+
+
+os.makedirs(
+    MODEL_OUTPUT_DIR,
+    exist_ok=True
+)
