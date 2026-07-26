@@ -9,6 +9,7 @@ os.environ.pop("PROJ_DATA", None)
 import random
 import argparse
 import csv
+import json
 import shutil
 import tempfile
 from contextlib import ExitStack
@@ -40,11 +41,13 @@ from config import (
     OUTPUT_CHANNELS,
     DEVICE,
     RANDOM_SEED,
-    USE_SKYSENSE_FOR_ORTHO,
-    SKYSENSE_CHECKPOINT_PATH
+    MODEL_ARCHITECTURE,
+    DOFA_VARIANT,
+    DOFA_CHECKPOINT_DIR,
+    DOFA_WAVELENGTHS
 )
 from model import UNet
-from skysense_model import SkySenseUNet
+from dofa_model import DOFAUNet
 from dataset import list_tiles
 from metrics import raw_confusion_counts, metrics_from_confusion
 from plotting import plot_confusion_matrix
@@ -530,15 +533,18 @@ def print_metrics_table(title, rows):
 
 
 def load_model(dataset_name, in_channels):
-    if dataset_name == "01_ortho_dataset" and USE_SKYSENSE_FOR_ORTHO:
-        # freeze_backbone doesn't matter here (eval mode, no
-        # optimizer) -- SkySenseUNet still needs a checkpoint_path to
-        # construct its decoder (channel dims are discovered from a
-        # dummy forward pass through the backbone), but every weight,
-        # frozen or not, gets overwritten by the fine-tuned
-        # best_model.pth loaded just below anyway.
-        model = SkySenseUNet(
-            checkpoint_path=SKYSENSE_CHECKPOINT_PATH,
+    architecture = MODEL_ARCHITECTURE.get(dataset_name, "unet")
+
+    # freeze_backbone/differential-LR settings don't matter here (eval
+    # mode, no optimizer) -- DOFAUNet still needs its constructor args
+    # to build the right-shaped decoder, but every weight, frozen or
+    # not, gets overwritten by the fine-tuned best_model.pth loaded
+    # just below anyway.
+    if architecture == "dofa":
+        model = DOFAUNet(
+            wavelengths=DOFA_WAVELENGTHS[dataset_name],
+            checkpoint_dir=DOFA_CHECKPOINT_DIR,
+            variant=DOFA_VARIANT,
             out_channels=OUTPUT_CHANNELS,
             freeze_backbone=False
         ).to(DEVICE)
@@ -563,6 +569,32 @@ def load_model(dataset_name, in_channels):
     model.eval()
 
     return model
+
+
+def build_prediction_metadata(dataset_name, in_channels, num_samples, sites, full_site):
+    """Captures the settings this prediction run actually used, so
+    prediction_metrics.json is self-documenting -- which model
+    architecture, which checkpoint, which sites, sample count, and
+    whether full-site mode was on -- without needing to cross-reference
+    config.py or the command line later."""
+
+    architecture = MODEL_ARCHITECTURE.get(dataset_name, "unet")
+
+    metadata = {
+        "dataset": dataset_name,
+        "in_channels": in_channels,
+        "num_samples_per_site": num_samples,
+        "sites": sites,
+        "full_site": full_site,
+        "model_architecture": architecture,
+        "checkpoint_path": os.path.join(MODEL_OUTPUT_DIR, dataset_name, "best_model.pth")
+    }
+
+    if architecture == "dofa":
+        metadata["dofa_variant"] = DOFA_VARIANT
+        metadata["dofa_wavelengths"] = DOFA_WAVELENGTHS[dataset_name]
+
+    return metadata
 
 
 def show_predictions(dataset_name, in_channels, num_samples, sites, full_site=False):
@@ -623,9 +655,15 @@ def show_predictions(dataset_name, in_channels, num_samples, sites, full_site=Fa
         csv_path = os.path.join(output_dir, "prediction_metrics.csv")
         save_metrics_csv(full_site_metrics, csv_path)
 
+        run_metadata = build_prediction_metadata(dataset_name, in_channels, num_samples, sites, full_site)
+
+        json_path = os.path.join(output_dir, "prediction_metrics.json")
+        with open(json_path, "w") as metrics_file:
+            json.dump({"hyperparameters": run_metadata, "sites": full_site_metrics}, metrics_file, indent=2)
+
         print_metrics_table(f"Full-site prediction metrics ({dataset_name})", full_site_metrics)
 
-        print(f"\n  Saved metrics -> {os.path.basename(csv_path)}")
+        print(f"\n  Saved metrics -> {os.path.basename(csv_path)}, {os.path.basename(json_path)}")
 
     print(f"  Saved overviews and GeoTIFFs -> {output_dir}")
 

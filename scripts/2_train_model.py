@@ -29,14 +29,18 @@ from config import (
     NUM_WORKERS,
     AUGMENT_TRAIN,
     MAX_POS_WEIGHT,
-    USE_SKYSENSE_FOR_ORTHO,
-    SKYSENSE_CHECKPOINT_PATH,
-    SKYSENSE_FREEZE_EPOCHS,
-    SKYSENSE_UNFREEZE_STAGES,
-    SKYSENSE_BACKBONE_LR
+    RANDOM_SEED,
+    RANDOM_SAMPLE_PERCENTAGE,
+    MODEL_ARCHITECTURE,
+    DOFA_VARIANT,
+    DOFA_CHECKPOINT_DIR,
+    DOFA_FREEZE_EPOCHS,
+    DOFA_UNFREEZE_BLOCKS,
+    DOFA_BACKBONE_LR,
+    DOFA_WAVELENGTHS
 )
 from model import UNet
-from skysense_model import SkySenseUNet
+from dofa_model import DOFAUNet
 from dataset import list_tiles, subsample_pairs, estimate_positive_ratio, LandslideDataset
 from losses import BCEDiceLoss
 from metrics import binary_metrics, raw_confusion_counts, metrics_from_confusion
@@ -246,28 +250,40 @@ def save_history_xlsx(history, path, best_epoch=None):
 
 
 def build_model_and_optimizer(dataset_name, in_channels):
-    """Builds the model + optimizer for one dataset variant. Uses
-    SkySenseUNet (frozen-backbone, differential learning rates) for
-    01_ortho_dataset when USE_SKYSENSE_FOR_ORTHO is set; every other
-    dataset variant (and 01_ortho_dataset when the flag is off) uses
-    the plain from-scratch UNet, unchanged."""
+    """Builds the model + optimizer for one dataset variant, based on
+    MODEL_ARCHITECTURE[dataset_name] ("unet" or "dofa"). DOFA starts
+    with the backbone frozen and uses differential learning rates;
+    plain UNet trains fully from scratch at LEARNING_RATE throughout."""
 
-    if dataset_name == "01_ortho_dataset" and USE_SKYSENSE_FOR_ORTHO:
-        model = SkySenseUNet(
-            checkpoint_path=SKYSENSE_CHECKPOINT_PATH,
+    architecture = MODEL_ARCHITECTURE.get(dataset_name, "unet")
+
+    if architecture == "dofa":
+        wavelengths = DOFA_WAVELENGTHS[dataset_name]
+
+        if len(wavelengths) != in_channels:
+            raise ValueError(
+                f"DOFA_WAVELENGTHS['{dataset_name}'] has {len(wavelengths)} entries "
+                f"but the dataset has {in_channels} channels -- these must match "
+                "(one wavelength per input channel, in the same order)."
+            )
+
+        model = DOFAUNet(
+            wavelengths=wavelengths,
+            checkpoint_dir=DOFA_CHECKPOINT_DIR,
+            variant=DOFA_VARIANT,
             out_channels=OUTPUT_CHANNELS,
             freeze_backbone=True
         ).to(DEVICE)
 
         optimizer = torch.optim.Adam(
-            model.differential_param_groups(decoder_lr=LEARNING_RATE, backbone_lr=SKYSENSE_BACKBONE_LR),
+            model.differential_param_groups(decoder_lr=LEARNING_RATE, backbone_lr=DOFA_BACKBONE_LR),
             weight_decay=WEIGHT_DECAY
         )
 
         print(
-            f"  Using SkySenseUNet (backbone frozen for the first "
-            f"{SKYSENSE_FREEZE_EPOCHS} epoch(s), then last "
-            f"{SKYSENSE_UNFREEZE_STAGES} stage(s) unfrozen at lr={SKYSENSE_BACKBONE_LR})"
+            f"  Using DOFAUNet ({DOFA_VARIANT}, wavelengths={wavelengths}); backbone "
+            f"frozen for the first {DOFA_FREEZE_EPOCHS} epoch(s), then last "
+            f"{DOFA_UNFREEZE_BLOCKS} block(s) unfrozen at lr={DOFA_BACKBONE_LR}"
         )
 
         return model, optimizer
@@ -285,25 +301,69 @@ def build_model_and_optimizer(dataset_name, in_channels):
     return model, optimizer
 
 
-def maybe_unfreeze_skysense_backbone(model, optimizer, epoch):
-    """No-op for a plain UNet. For a SkySenseUNet, once `epoch` crosses
-    SKYSENSE_FREEZE_EPOCHS, unfreezes its last SKYSENSE_UNFREEZE_STAGES
-    backbone stages and adds their parameters to the optimizer at
-    SKYSENSE_BACKBONE_LR. Only fires once, on the exact epoch after the
-    freeze period ends."""
+def maybe_unfreeze_pretrained_backbone(model, optimizer, epoch):
+    """No-op for a plain UNet. For a DOFAUNet, once `epoch` crosses
+    DOFA_FREEZE_EPOCHS, unfreezes DOFA_UNFREEZE_BLOCKS backbone blocks
+    and adds their parameters to the optimizer at DOFA_BACKBONE_LR.
+    Only fires once, on the exact epoch after the freeze period ends."""
 
-    if not hasattr(model, "unfreeze_backbone_stages"):
+    if not hasattr(model, "unfreeze_backbone_blocks"):
         return
 
-    if epoch != SKYSENSE_FREEZE_EPOCHS + 1:
+    if epoch != DOFA_FREEZE_EPOCHS + 1:
         return
 
-    model.unfreeze_backbone_stages(SKYSENSE_UNFREEZE_STAGES)
+    model.unfreeze_backbone_blocks(DOFA_UNFREEZE_BLOCKS)
+    backbone_lr = DOFA_BACKBONE_LR
 
     newly_trainable = [parameter for parameter in model.backbone.parameters() if parameter.requires_grad]
 
     if newly_trainable:
-        optimizer.add_param_group({"params": newly_trainable, "lr": SKYSENSE_BACKBONE_LR})
+        optimizer.add_param_group({"params": newly_trainable, "lr": backbone_lr})
+
+
+def build_run_metadata(dataset_name, in_channels, pos_weight, positive_ratio):
+    """Captures every hyperparameter/setting that actually shaped this
+    training run, so history.json and confusion_matrix.json are each
+    self-documenting -- reproducible from the JSON file alone, without
+    having to cross-reference config.py (which may have since changed
+    for other runs)."""
+
+    architecture = MODEL_ARCHITECTURE.get(dataset_name, "unet")
+
+    metadata = {
+        "dataset": dataset_name,
+        "in_channels": in_channels,
+        "output_channels": OUTPUT_CHANNELS,
+        "epochs": EPOCHS,
+        "batch_size": BATCH_SIZE,
+        "learning_rate": LEARNING_RATE,
+        "weight_decay": WEIGHT_DECAY,
+        "max_pos_weight": MAX_POS_WEIGHT,
+        "positive_pixel_ratio": positive_ratio,
+        "pos_weight_used": pos_weight,
+        "encoder_channels": ENCODER_CHANNELS,
+        "decoder_channels": DECODER_CHANNELS,
+        "bottleneck_channels": BOTTLENECK_CHANNELS,
+        "random_seed": RANDOM_SEED,
+        "random_sample_percentage": RANDOM_SAMPLE_PERCENTAGE,
+        "augment_train": AUGMENT_TRAIN,
+        "fit_sites": FIT_SITES,
+        "val_sites": VAL_SITES,
+        "test_sites": TEST_SITES,
+        "model_architecture": architecture
+    }
+
+    if architecture == "dofa":
+        metadata.update({
+            "dofa_variant": DOFA_VARIANT,
+            "dofa_wavelengths": DOFA_WAVELENGTHS[dataset_name],
+            "dofa_freeze_epochs": DOFA_FREEZE_EPOCHS,
+            "dofa_unfreeze_blocks": DOFA_UNFREEZE_BLOCKS,
+            "dofa_backbone_lr": DOFA_BACKBONE_LR
+        })
+
+    return metadata
 
 
 def train_on_dataset(dataset_name, in_channels):
@@ -334,7 +394,7 @@ def train_on_dataset(dataset_name, in_channels):
     for epoch in range(1, EPOCHS + 1):
         start_time = time.time()
 
-        maybe_unfreeze_skysense_backbone(model, optimizer, epoch)
+        maybe_unfreeze_pretrained_backbone(model, optimizer, epoch)
 
         train_desc = f"[{dataset_name}] Epoch {epoch}/{EPOCHS} (train)"
         val_desc = f"[{dataset_name}] Epoch {epoch}/{EPOCHS} (val)"
@@ -368,8 +428,10 @@ def train_on_dataset(dataset_name, in_channels):
 
     torch.save(model.state_dict(), os.path.join(output_dir, "final_model.pth"))
 
+    run_metadata = build_run_metadata(dataset_name, in_channels, pos_weight, positive_ratio)
+
     with open(os.path.join(output_dir, "history.json"), "w") as history_file:
-        json.dump(history, history_file, indent=2)
+        json.dump({"hyperparameters": run_metadata, "history": history}, history_file, indent=2)
 
     save_history_csv(history, os.path.join(output_dir, "history.csv"))
     save_history_xlsx(history, os.path.join(output_dir, "history.xlsx"), best_epoch=best_epoch)
@@ -384,7 +446,12 @@ def train_on_dataset(dataset_name, in_channels):
     final_metrics = metrics_from_confusion(tp, fp, fn, tn)
 
     with open(os.path.join(output_dir, "confusion_matrix.json"), "w") as cm_file:
-        json.dump({"tp": tp, "fp": fp, "fn": fn, "tn": tn, **final_metrics}, cm_file, indent=2)
+        json.dump({
+            "hyperparameters": run_metadata,
+            "best_epoch": best_epoch,
+            "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+            **final_metrics
+        }, cm_file, indent=2)
 
     print(f"  Saved: history.json/csv/xlsx, training_curves.png, confusion_matrix.png/json -> {output_dir}")
 

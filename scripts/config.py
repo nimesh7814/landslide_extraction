@@ -184,34 +184,69 @@ AUGMENT_BLUR_SIGMA_RANGE = (0.3, 1.2)
 
 
 # =====================================================
-# SKYSENSE (pretrained backbone) SETTINGS
+# MODEL ARCHITECTURE SELECTION (per dataset variant)
 # =====================================================
 
-# Whether 01_ortho_dataset should use skysense_model.SkySenseUNet
-# (a SkySense Swin V2-Huge backbone + custom decoder) instead of
-# model.UNet. Only applies to 01_ortho_dataset -- the DTM/hillshade/
-# slope variants have no matching pretrained SkySense modality, so
-# they always use the plain UNet regardless of this flag.
-USE_SKYSENSE_FOR_ORTHO = False
+# Which model class each dataset variant trains with:
+#   "unet" -> model.UNet, from scratch (works for any channel count)
+#   "dofa" -> dofa_model.DOFAUNet (DOFA ViT backbone). Works for ANY
+#             channel count via wavelength-conditioned dynamic patch
+#             embedding -- but DTM/hillshade/slope have no true
+#             wavelength, so those channels use placeholder
+#             pseudo-wavelengths (see DOFA_WAVELENGTHS below). That's
+#             not a claim DOFA has learned anything meaningful about
+#             elevation data specifically, just that its architecture
+#             can structurally accept it.
+MODEL_ARCHITECTURE = {
+    "01_ortho_dataset": "dofa",
+    "02_ortho_dtm_dataset": "dofa",
+    "03_ortho_dtm_hillshade_dataset": "dofa",
+    "04_ortho_dtm_hillshade_slope_dataset": "dofa"
+}
 
-# Path to the downloaded skysense_model_backbone_hr.pth checkpoint
-# (see https://github.com/Jack-bo1220/SkySense's README for where to
-# get it -- it's a manual download, not automatable).
-SKYSENSE_CHECKPOINT_PATH = os.path.join(BASE_DIR, "..", "checkpoints", "skysense_model_backbone_hr.pth")
 
-# Epochs to train with the backbone fully frozen (decoder-only)
-# before unfreezing SKYSENSE_UNFREEZE_STAGES for the remaining epochs.
-SKYSENSE_FREEZE_EPOCHS = 20
+# =====================================================
+# DOFA (pretrained backbone) SETTINGS
+# =====================================================
 
-# How many of the backbone's 4 stages (counting from the deepest) to
-# unfreeze after SKYSENSE_FREEZE_EPOCHS.
-SKYSENSE_UNFREEZE_STAGES = 1
+# "vit_base_patch16" (768-dim, 12 blocks, ~86M params) or
+# "vit_large_patch16" (1024-dim, 24 blocks, ~300M params). Base is
+# lighter/faster; large may generalize better but costs much more
+# compute -- start with base.
+DOFA_VARIANT = "vit_base_patch16"
+
+# Where DOFA's checkpoint gets auto-downloaded/cached (via torch.hub --
+# no manual file placement needed).
+DOFA_CHECKPOINT_DIR = os.path.join(BASE_DIR, "..", "model", "dofa", "checkpoints")
+
+# Epochs to train with the backbone fully frozen before unfreezing
+# DOFA_UNFREEZE_BLOCKS for the remaining epochs.
+DOFA_FREEZE_EPOCHS = 20
+
+# How many of the last transformer blocks (out of 12 for vit_base, 24
+# for vit_large) to unfreeze after DOFA_FREEZE_EPOCHS.
+DOFA_UNFREEZE_BLOCKS = 2
 
 # Learning rate for any unfrozen backbone parameters -- deliberately
-# much lower than LEARNING_RATE (used for the decoder throughout, and
-# for the whole plain UNet) to avoid destroying the pretrained
+# much lower than LEARNING_RATE, to avoid destroying the pretrained
 # weights during fine-tuning.
-SKYSENSE_BACKBONE_LR = LEARNING_RATE * 0.1
+DOFA_BACKBONE_LR = LEARNING_RATE * 0.1
+
+# Per-channel wavelengths (micrometers), in the SAME channel order as
+# each dataset's tiles. Real optical wavelengths for R/G/B (matches
+# DOFA's own reference RGB_WAVELENGTHS). DTM/hillshade/slope have no
+# true wavelength -- these are placeholder pseudo-wavelengths only,
+# spaced just past the visible range so they don't collide with a real
+# spectral meaning. This lets DOFA's dynamic patch embedding accept
+# them structurally; it is NOT evidence DOFA has learned anything
+# meaningful about elevation/terrain data specifically -- flag this
+# clearly in any write-up of results for datasets 02-04.
+DOFA_WAVELENGTHS = {
+    "01_ortho_dataset": [0.66, 0.56, 0.48],
+    "02_ortho_dtm_dataset": [0.66, 0.56, 0.48, 1.00],
+    "03_ortho_dtm_hillshade_dataset": [0.66, 0.56, 0.48, 1.00, 1.15],
+    "04_ortho_dtm_hillshade_slope_dataset": [0.66, 0.56, 0.48, 1.00, 1.15, 1.30]
+}
 
 
 # DEVICE
