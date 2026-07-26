@@ -57,7 +57,7 @@ def plot_training_curves(history, output_dir):
     plt.close(fig)
 
 
-def plot_confusion_matrix(tp, fp, fn, tn, output_dir):
+def plot_confusion_matrix(tp, fp, fn, tn, output_dir, filename="confusion_matrix.png"):
     """Saves a 2x2 confusion matrix heatmap (pixel counts) for the
     landslide / non-landslide classes."""
 
@@ -84,5 +84,5 @@ def plot_confusion_matrix(tp, fp, fn, tn, output_dir):
 
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, "confusion_matrix.png"), dpi=150)
+    fig.savefig(os.path.join(output_dir, filename), dpi=150)
     plt.close(fig)

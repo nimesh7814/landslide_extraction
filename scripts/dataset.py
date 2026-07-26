@@ -11,17 +11,11 @@ from config import (
     DATASET_DIR,
     RANDOM_SAMPLE_PERCENTAGE,
     RANDOM_SEED,
-    TRAIN_PERCENTAGE,
-    VALIDATION_PERCENTAGE,
     AUGMENT_FLIP_PROBABILITY,
     AUGMENT_BRIGHTNESS_PROBABILITY,
     AUGMENT_BRIGHTNESS_RANGE,
     AUGMENT_BLUR_PROBABILITY,
     AUGMENT_BLUR_SIGMA_RANGE
-)
-
-assert abs(TRAIN_PERCENTAGE + VALIDATION_PERCENTAGE - 1.0) < 1e-6, (
-    "TRAIN_PERCENTAGE and VALIDATION_PERCENTAGE must sum to 1.0"
 )
 
 
@@ -59,25 +53,24 @@ def list_tiles(dataset_name, sites):
     return pairs
 
 
-def train_val_split(pairs):
-    """Shuffle deterministically, optionally subsample, then split into
-    train/val pairs using the percentages defined in config.py."""
+def subsample_pairs(pairs, percentage=RANDOM_SAMPLE_PERCENTAGE, seed=RANDOM_SEED):
+    """Optionally shrinks a list of (image, mask) pairs down to the
+    given percentage (deterministic, via `seed`). Used to reduce the
+    amount of training data for quick experiments -- leave at 1.0 to
+    use every pair as-is. Site-level train/validation splitting is
+    handled separately, in config.py (FIT_SITES / VAL_SITES)."""
 
-    rng = random.Random(RANDOM_SEED)
+    if percentage >= 1.0:
+        return pairs
+
+    rng = random.Random(seed)
 
     shuffled = pairs.copy()
     rng.shuffle(shuffled)
 
-    if RANDOM_SAMPLE_PERCENTAGE < 1.0:
-        keep = max(1, int(len(shuffled) * RANDOM_SAMPLE_PERCENTAGE))
-        shuffled = shuffled[:keep]
+    keep = max(1, int(len(shuffled) * percentage))
 
-    split_index = int(len(shuffled) * TRAIN_PERCENTAGE)
-
-    train_pairs = shuffled[:split_index]
-    val_pairs = shuffled[split_index:]
-
-    return train_pairs, val_pairs
+    return shuffled[:keep]
 
 
 def estimate_positive_ratio(pairs, max_samples=200, seed=RANDOM_SEED):

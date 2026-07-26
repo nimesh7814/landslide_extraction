@@ -28,6 +28,15 @@ def parse_args():
              "one after another."
     )
     parser.add_argument(
+        "--site",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Passed through to 1_create_train_dataset.py and 3_predict.py: which "
+             "site(s) to process (1-12), e.g. --site 3 or --site 3 7. If omitted, "
+             "all sites are processed."
+    )
+    parser.add_argument(
         "--num",
         type=int,
         default=6,
@@ -38,6 +47,21 @@ def parse_args():
         choices=["test", "train"],
         default="test",
         help="Which site set 3_predict.py should sample from (default: test)."
+    )
+    parser.add_argument(
+        "--full-site",
+        dest="full_site",
+        action="store_true",
+        default=True,
+        help="Passed through to 3_predict.py: stitch every tile of each site into one "
+             "full-site predicted mask GeoTIFF, plus per-site metrics CSV and confusion "
+             "matrix. On by default."
+    )
+    parser.add_argument(
+        "--no-full-site",
+        dest="full_site",
+        action="store_false",
+        help="Passed through to 3_predict.py: disable full-site mosaic/metrics generation."
     )
     parser.add_argument(
         "--cleanup",
@@ -64,8 +88,17 @@ def run_step(script_name, extra_args):
     print(f"Running: {' '.join(command)}")
     print(f"{'=' * 70}")
 
+    # Some systems (e.g. with PostgreSQL/PostGIS installed) set
+    # PROJ_LIB / PROJ_DATA globally to an incompatible proj.db, which
+    # breaks rasterio's CRS lookups in the child scripts. Stripping
+    # these here too, on top of each script doing it, covers any
+    # subprocess this pipeline spawns.
+    env = os.environ.copy()
+    env.pop("PROJ_LIB", None)
+    env.pop("PROJ_DATA", None)
+
     start_time = time.time()
-    result = subprocess.run(command)
+    result = subprocess.run(command, env=env)
     elapsed = time.time() - start_time
 
     if result.returncode != 0:
@@ -109,12 +142,17 @@ def delete_dataset_tiles(model_number):
         os.rmdir(dataset_dir)
 
 
-def run_for_model(model_number, num_samples, sites, cleanup):
+def run_for_model(model_number, site, num_samples, sites, cleanup, full_site):
     model_args = ["--model", str(model_number)] if model_number is not None else []
+    site_args = ["--site"] + [str(s) for s in site] if site else []
 
-    run_step("1_create_train_dataset.py", model_args)
+    dataset_args = model_args + site_args
+    predict_args = model_args + site_args + ["--num", str(num_samples), "--sites", sites]
+    predict_args.append("--full-site" if full_site else "--no-full-site")
+
+    run_step("1_create_train_dataset.py", dataset_args)
     run_step("2_train_model.py", model_args)
-    run_step("3_predict.py", model_args + ["--num", str(num_samples), "--sites", sites])
+    run_step("3_predict.py", predict_args)
 
     if cleanup:
         delete_dataset_tiles(model_number)
@@ -129,7 +167,7 @@ def main():
         cleanup = args.cleanup if args.cleanup is not None else False
 
         print(f"Running pipeline for model {args.model} only (cleanup: {'on' if cleanup else 'off'})")
-        run_for_model(args.model, args.num, args.sites, cleanup=cleanup)
+        run_for_model(args.model, args.site, args.num, args.sites, cleanup=cleanup, full_site=args.full_site)
 
     else:
         cleanup = args.cleanup if args.cleanup is not None else True
@@ -141,7 +179,7 @@ def main():
             print(f"#  MODEL {model_number}")
             print(f"{'#' * 70}")
 
-            run_for_model(model_number, args.num, args.sites, cleanup=cleanup)
+            run_for_model(model_number, args.site, args.num, args.sites, cleanup=cleanup, full_site=args.full_site)
 
     total_elapsed = time.time() - pipeline_start
     print(f"\nFull pipeline finished in {total_elapsed / 60:.1f} minute(s)")

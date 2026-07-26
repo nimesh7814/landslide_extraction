@@ -1,11 +1,23 @@
 import os
+
+# Some systems (e.g. with PostgreSQL/PostGIS installed) set PROJ_LIB /
+# PROJ_DATA globally, pointing to an older, incompatible proj.db. This
+# breaks rasterio's CRS lookups (e.g. CRS.from_epsg()) since it then
+# tries to use that database instead of its own bundled one. Clearing
+# these before rasterio is imported lets it fall back to its own
+# bundled PROJ database.
+os.environ.pop("PROJ_LIB", None)
+os.environ.pop("PROJ_DATA", None)
+
 import argparse
+import json
 from contextlib import ExitStack
 
 import cv2
 import numpy as np
 import rasterio
 import shapefile
+from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from rasterio.features import rasterize
 from rasterio.windows import (
@@ -28,12 +40,34 @@ OUTPUT_DIR = os.path.join(
     "1_training_datasets"
 )
 
+# Where the dataset-wide (all 12 sites) min/max normalization ranges
+# are cached, so they only need to be computed once and stay
+# consistent across every run regardless of --site/--model filtering.
+NORMALIZATION_RANGES_PATH = os.path.join(OUTPUT_DIR, "global_normalization_ranges.json")
+
 
 # SETTINGS
 TARGET_SIZE = 512
 
 SITE_START = 1
 SITE_END = 12
+
+# Fallback CRS (EPSG code) used for the tile shapefiles when a site's
+# orthomosaic has no CRS embedded in its GeoTIFF metadata. Site data
+# for this project is in Sri Lanka, so this is set to SLD99 / Sri
+# Lanka Grid 1999.
+FALLBACK_CRS_EPSG = 5235
+
+# Some annotation shapefiles are full-coverage layers with a 0/1
+# attribute distinguishing landslide (1) from non-landslide (0)
+# polygons, rather than containing only landslide polygons. Set
+# ANNOTATION_FIELD_NAME to that attribute's field name to filter to
+# just the landslide polygons when rasterizing the mask. Leave as
+# None to auto-detect (only works when the shapefile has exactly one
+# non-system field) -- auto-detection prints what it found, so check
+# that output the first time you run this.
+ANNOTATION_FIELD_NAME = "value"
+ANNOTATION_POSITIVE_VALUE = 1
 
 
 DATASETS = {
@@ -117,7 +151,16 @@ def get_files(site):
     }
 
 
-def read_geometries(path):
+def read_geometries(path, field_name=None, positive_value=None):
+    """Reads geometries from a shapefile.
+
+    If field_name is None, every shape is returned unfiltered (used
+    for the footprint shapefile, where all polygons should count).
+
+    If field_name is given, only shapes whose attribute at that field
+    equals positive_value are returned (used for annotation shapefiles
+    that are a full-coverage layer with a 0/1 landslide attribute,
+    rather than containing only landslide polygons)."""
 
     if not os.path.isfile(path):
         raise FileNotFoundError(
@@ -125,18 +168,82 @@ def read_geometries(path):
         )
 
     with shapefile.Reader(path) as source:
-        geometries = [
-            shape.__geo_interface__
-            for shape in source.iterShapes()
-            if shape.points
-        ]
+        if field_name is None:
+            geometries = [
+                shape.__geo_interface__
+                for shape in source.iterShapes()
+                if shape.points
+            ]
+
+        else:
+            available_fields = [
+                field[0] for field in source.fields
+                if field[0] != "DeletionFlag"
+            ]
+
+            if field_name not in available_fields:
+                raise ValueError(
+                    f"Field '{field_name}' not found in {path}. "
+                    f"Available fields: {available_fields}"
+                )
+
+            geometries = []
+            total_features = 0
+            matched_features = 0
+
+            for shape_record in source.iterShapeRecords():
+                total_features += 1
+
+                shape = shape_record.shape
+                if not shape.points:
+                    continue
+
+                value = shape_record.record[field_name]
+
+                if value == positive_value or str(value) == str(positive_value):
+                    geometries.append(shape.__geo_interface__)
+                    matched_features += 1
+
+            print(
+                f"  {os.path.basename(path)}: field '{field_name}', "
+                f"{matched_features}/{total_features} feature(s) match "
+                f"value={positive_value}"
+            )
 
     if not geometries:
+        detail = f" matching {field_name}=={positive_value}" if field_name else ""
         raise ValueError(
-            f"No geometries found in {path}"
+            f"No geometries found in {path}{detail}"
         )
 
     return geometries
+
+
+def resolve_annotation_field_name(path):
+    """Resolves which attribute field marks landslide polygons in the
+    annotation shapefile. Uses ANNOTATION_FIELD_NAME if set; otherwise
+    auto-detects only when the shapefile has exactly one non-system
+    field, and prints what it found so you can verify it."""
+
+    if ANNOTATION_FIELD_NAME is not None:
+        return ANNOTATION_FIELD_NAME
+
+    with shapefile.Reader(path) as source:
+        available_fields = [
+            field[0] for field in source.fields
+            if field[0] != "DeletionFlag"
+        ]
+
+    if len(available_fields) == 1:
+        field_name = available_fields[0]
+        print(f"  Auto-detected annotation field: '{field_name}' (from {path})")
+        return field_name
+
+    raise ValueError(
+        f"Cannot auto-detect the landslide attribute field in {path}: found "
+        f"{len(available_fields)} field(s) {available_fields}. Set "
+        "ANNOTATION_FIELD_NAME near the top of this script to the correct field name."
+    )
 
 
 def create_mask_if_missing(files):
@@ -168,7 +275,12 @@ def create_mask_if_missing(files):
 
     temporary_mask_path = f"{mask_path}.tmp"
 
-    geometries = read_geometries(annotation_path)
+    annotation_field = resolve_annotation_field_name(annotation_path)
+    geometries = read_geometries(
+        annotation_path,
+        field_name=annotation_field,
+        positive_value=ANNOTATION_POSITIVE_VALUE
+    )
 
     with rasterio.open(orthomosaic_path) as reference:
         mask = rasterize(
@@ -383,7 +495,25 @@ def write_tile_index_shapefile(files, dataset_name, site_name, positions):
 
     with rasterio.open(orthomosaic_path) as reference:
         transform = reference.transform
-        crs = reference.crs
+        embedded_crs = reference.crs
+
+        # Site data's true CRS is known (EPSG:5235 / SLD99 Sri Lanka
+        # Grid 1999). Drone/photogrammetry outputs often carry no CRS,
+        # or an arbitrary local one, so this is applied unconditionally
+        # rather than only when embedded_crs is None.
+        crs = CRS.from_epsg(FALLBACK_CRS_EPSG)
+
+        if embedded_crs is None:
+            print(
+                f"  Note: {orthomosaic_path} has no CRS embedded. "
+                f"Assigning EPSG:{FALLBACK_CRS_EPSG} for the tile shapefile."
+            )
+        elif embedded_crs != crs:
+            print(
+                f"  Note: {orthomosaic_path} reports a different embedded CRS "
+                f"({embedded_crs}). Overriding with EPSG:{FALLBACK_CRS_EPSG} "
+                "for the tile shapefile, since that is this project's known CRS."
+            )
 
         with shapefile.Writer(shp_path, shapeType=shapefile.POLYGON) as writer:
             writer.field("tile_no", "N")
@@ -413,10 +543,9 @@ def write_tile_index_shapefile(files, dataset_name, site_name, positions):
                     (top + bottom) / 2.0
                 )
 
-    if crs is not None:
-        prj_path = os.path.join(tiles_dir, f"{site_name}_tiles.prj")
-        with open(prj_path, "w") as prj_file:
-            prj_file.write(crs.to_wkt())
+    prj_path = os.path.join(tiles_dir, f"{site_name}_tiles.prj")
+    with open(prj_path, "w") as prj_file:
+        prj_file.write(crs.to_wkt(version="WKT1_ESRI"))
 
     print("Saved tile index shapefile:", shp_path)
 
@@ -450,6 +579,118 @@ def create_output_folder(dataset):
     return img_folder, mask_folder
 
 
+def save_global_normalization_ranges(ranges, path):
+    nested = {}
+
+    for (band_name, band_index), (min_val, max_val) in ranges.items():
+        nested.setdefault(band_name, {})[str(band_index)] = [min_val, max_val]
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    with open(path, "w") as cache_file:
+        json.dump(nested, cache_file, indent=2)
+
+
+def load_global_normalization_ranges(path):
+    if not os.path.isfile(path):
+        return {}
+
+    with open(path) as cache_file:
+        nested = json.load(cache_file)
+
+    return {
+        (band_name, int(band_index)): tuple(value_range)
+        for band_name, per_band in nested.items()
+        for band_index, value_range in per_band.items()
+    }
+
+
+def compute_global_normalization_ranges(bands_needed, normalization_cache):
+    """Ensures normalization_cache has one (band_name, band_index) ->
+    (min, max) range per band needed, shared across every site.
+
+    Elevation-derived channels (DTM, hillshade, slope) previously had
+    their min/max computed per-site, per-file -- so a normalized value
+    of e.g. 0.5 meant something different from one site's DTM to the
+    next. That's fixed here by always scanning every one of the
+    project's SITE_START-SITE_END sites (never just the ones selected
+    via --site) and merging into one dataset-wide range per band, so
+    a site's normalized values stay on a consistent physical scale
+    project-wide, and are identical regardless of which subset of
+    sites/models any single run happens to process.
+
+    Results are cached to NORMALIZATION_RANGES_PATH so this expensive
+    full scan only has to run once; later runs just reuse it (unless a
+    newly needed band isn't in the cache yet, in which case only that
+    band gets (re)scanned)."""
+
+    cached = load_global_normalization_ranges(NORMALIZATION_RANGES_PATH)
+
+    needed_keys = {
+        (band_name, band_index)
+        for band_name in bands_needed
+        for band_index in ([1, 2, 3] if band_name == "orthomosaic" else [1])
+    }
+
+    missing_keys = {key for key in needed_keys if key not in cached}
+
+    if missing_keys:
+        missing_bands = sorted({band_name for band_name, _ in missing_keys})
+
+        print(
+            "Computing global normalization ranges for:", missing_bands,
+            f"(scanning all sites {SITE_START}-{SITE_END}, this only needs to happen once)"
+        )
+
+        for site in tqdm(
+                range(SITE_START, SITE_END + 1),
+                desc="Scanning global normalization ranges",
+                unit="site"
+        ):
+            files = get_files(site)
+
+            for band_name in missing_bands:
+                file_path = files[band_name]
+
+                if not os.path.isfile(file_path):
+                    continue
+
+                with rasterio.open(file_path) as source:
+                    band_indexes = [1, 2, 3] if band_name == "orthomosaic" else [1]
+
+                    for band_index in band_indexes:
+                        key = (band_name, band_index)
+
+                        if key not in missing_keys:
+                            continue
+
+                        per_site_cache = {}
+                        site_min, site_max = get_normalization_range(
+                            source, band_index, per_site_cache, band_name
+                        )
+
+                        if key not in cached:
+                            cached[key] = (site_min, site_max)
+                        else:
+                            existing_min, existing_max = cached[key]
+                            cached[key] = (
+                                min(existing_min, site_min),
+                                max(existing_max, site_max)
+                            )
+
+        save_global_normalization_ranges(cached, NORMALIZATION_RANGES_PATH)
+        print("Saved global normalization ranges ->", NORMALIZATION_RANGES_PATH)
+    else:
+        print("Using cached global normalization ranges from:", NORMALIZATION_RANGES_PATH)
+
+    normalization_cache.update({key: cached[key] for key in needed_keys})
+
+    print("Global normalization ranges in use:")
+    for band_name, band_index in sorted(needed_keys):
+        min_val, max_val = normalization_cache[(band_name, band_index)]
+        print(f"  {band_name} band {band_index}: [{min_val:.4f}, {max_val:.4f}]")
+
+
 def get_normalization_range(
         source,
         band_index,
@@ -458,7 +699,7 @@ def get_normalization_range(
 ):
 
     key = (
-        os.path.abspath(source.name),
+        layer_name,
         band_index
     )
 
@@ -792,6 +1033,15 @@ def parse_args():
         default=None,
         help="Which dataset variant to create (1-4). If omitted, all variants are created."
     )
+    parser.add_argument(
+        "--site",
+        type=int,
+        nargs="+",
+        choices=list(range(SITE_START, SITE_END + 1)),
+        default=None,
+        help=f"Which site(s) to process ({SITE_START}-{SITE_END}), e.g. --site 3 or "
+             "--site 3 7. If omitted, all sites are processed."
+    )
     return parser.parse_args()
 
 
@@ -805,24 +1055,37 @@ def select_datasets(model_number):
     return {selected_name: DATASETS[selected_name]}
 
 
+def select_sites(site_numbers):
+    if site_numbers is None:
+        return list(range(SITE_START, SITE_END + 1))
+
+    return site_numbers
+
+
 def main():
     args = parse_args()
 
     datasets_to_create = select_datasets(args.model)
+    sites_to_process = select_sites(args.site)
 
     print("Dataset creation configuration loaded")
     print("Tile size:", f"{TARGET_SIZE} x {TARGET_SIZE}")
-    print("Sites to process:", list(range(SITE_START, SITE_END + 1)))
+    print("Sites to process:", sites_to_process)
     print("Datasets to create:", list(datasets_to_create.keys()))
 
     total = 0
     normalization_cache = {}
 
+    bands_needed = sorted({
+        band
+        for bands in datasets_to_create.values()
+        for band in bands
+    })
+
+    compute_global_normalization_ranges(bands_needed, normalization_cache)
+
     for site in tqdm(
-            range(
-                SITE_START,
-                SITE_END + 1
-            ),
+            sites_to_process,
             desc="Sites",
             unit="site"
     ):

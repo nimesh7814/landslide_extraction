@@ -13,6 +13,8 @@ from openpyxl.styles import Font, Alignment, PatternFill
 from config import (
     DATASETS,
     TRAIN_SITES,
+    FIT_SITES,
+    VAL_SITES,
     TEST_SITES,
     MODEL_OUTPUT_DIR,
     BATCH_SIZE,
@@ -25,15 +27,20 @@ from config import (
     OUTPUT_CHANNELS,
     DEVICE,
     NUM_WORKERS,
-    AUGMENT_TRAIN
+    AUGMENT_TRAIN,
+    MAX_POS_WEIGHT,
+    USE_SKYSENSE_FOR_ORTHO,
+    SKYSENSE_CHECKPOINT_PATH,
+    SKYSENSE_FREEZE_EPOCHS,
+    SKYSENSE_UNFREEZE_STAGES,
+    SKYSENSE_BACKBONE_LR
 )
 from model import UNet
-from dataset import list_tiles, train_val_split, estimate_positive_ratio, LandslideDataset
+from skysense_model import SkySenseUNet
+from dataset import list_tiles, subsample_pairs, estimate_positive_ratio, LandslideDataset
 from losses import BCEDiceLoss
 from metrics import binary_metrics, raw_confusion_counts, metrics_from_confusion
 from plotting import plot_training_curves, plot_confusion_matrix
-
-MAX_POS_WEIGHT = 50.0
 
 
 def format_value(value, fmt):
@@ -67,12 +74,16 @@ def print_table(title, rows, columns):
 
 
 def build_dataloaders(dataset_name):
-    pairs = list_tiles(dataset_name, TRAIN_SITES)
+    train_pairs = list_tiles(dataset_name, FIT_SITES)
+    val_pairs = list_tiles(dataset_name, VAL_SITES)
 
-    if not pairs:
-        raise RuntimeError(f"No tiles found for dataset: {dataset_name}")
+    if not train_pairs:
+        raise RuntimeError(f"No training tiles found for dataset: {dataset_name} (sites {FIT_SITES})")
 
-    train_pairs, val_pairs = train_val_split(pairs)
+    if not val_pairs:
+        raise RuntimeError(f"No validation tiles found for dataset: {dataset_name} (sites {VAL_SITES})")
+
+    train_pairs = subsample_pairs(train_pairs)
 
     train_dataset = LandslideDataset(train_pairs, augment=AUGMENT_TRAIN)
     val_dataset = LandslideDataset(val_pairs, augment=False)
@@ -94,7 +105,7 @@ def build_dataloaders(dataset_name):
         pin_memory=(DEVICE == "cuda")
     )
 
-    print(f"  Tiles -> train: {len(train_pairs)}, val: {len(val_pairs)}")
+    print(f"  Tiles -> train (sites {FIT_SITES}): {len(train_pairs)}, val (sites {VAL_SITES}): {len(val_pairs)}")
 
     return train_loader, val_loader, train_pairs
 
@@ -234,6 +245,67 @@ def save_history_xlsx(history, path, best_epoch=None):
     workbook.save(path)
 
 
+def build_model_and_optimizer(dataset_name, in_channels):
+    """Builds the model + optimizer for one dataset variant. Uses
+    SkySenseUNet (frozen-backbone, differential learning rates) for
+    01_ortho_dataset when USE_SKYSENSE_FOR_ORTHO is set; every other
+    dataset variant (and 01_ortho_dataset when the flag is off) uses
+    the plain from-scratch UNet, unchanged."""
+
+    if dataset_name == "01_ortho_dataset" and USE_SKYSENSE_FOR_ORTHO:
+        model = SkySenseUNet(
+            checkpoint_path=SKYSENSE_CHECKPOINT_PATH,
+            out_channels=OUTPUT_CHANNELS,
+            freeze_backbone=True
+        ).to(DEVICE)
+
+        optimizer = torch.optim.Adam(
+            model.differential_param_groups(decoder_lr=LEARNING_RATE, backbone_lr=SKYSENSE_BACKBONE_LR),
+            weight_decay=WEIGHT_DECAY
+        )
+
+        print(
+            f"  Using SkySenseUNet (backbone frozen for the first "
+            f"{SKYSENSE_FREEZE_EPOCHS} epoch(s), then last "
+            f"{SKYSENSE_UNFREEZE_STAGES} stage(s) unfrozen at lr={SKYSENSE_BACKBONE_LR})"
+        )
+
+        return model, optimizer
+
+    model = UNet(
+        in_channels=in_channels,
+        out_channels=OUTPUT_CHANNELS,
+        encoder_channels=ENCODER_CHANNELS,
+        decoder_channels=DECODER_CHANNELS,
+        bottleneck_channels=BOTTLENECK_CHANNELS
+    ).to(DEVICE)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+
+    return model, optimizer
+
+
+def maybe_unfreeze_skysense_backbone(model, optimizer, epoch):
+    """No-op for a plain UNet. For a SkySenseUNet, once `epoch` crosses
+    SKYSENSE_FREEZE_EPOCHS, unfreezes its last SKYSENSE_UNFREEZE_STAGES
+    backbone stages and adds their parameters to the optimizer at
+    SKYSENSE_BACKBONE_LR. Only fires once, on the exact epoch after the
+    freeze period ends."""
+
+    if not hasattr(model, "unfreeze_backbone_stages"):
+        return
+
+    if epoch != SKYSENSE_FREEZE_EPOCHS + 1:
+        return
+
+    model.unfreeze_backbone_stages(SKYSENSE_UNFREEZE_STAGES)
+
+    newly_trainable = [parameter for parameter in model.backbone.parameters() if parameter.requires_grad]
+
+    if newly_trainable:
+        optimizer.add_param_group({"params": newly_trainable, "lr": SKYSENSE_BACKBONE_LR})
+
+
 def train_on_dataset(dataset_name, in_channels):
     print(f"\n=== Training on dataset: {dataset_name} ({in_channels} input channels) ===")
 
@@ -248,16 +320,9 @@ def train_on_dataset(dataset_name, in_channels):
 
     print(f"  Positive pixel ratio: {positive_ratio:.5f} -> pos_weight: {pos_weight:.2f}")
 
-    model = UNet(
-        in_channels=in_channels,
-        out_channels=OUTPUT_CHANNELS,
-        encoder_channels=ENCODER_CHANNELS,
-        decoder_channels=DECODER_CHANNELS,
-        bottleneck_channels=BOTTLENECK_CHANNELS
-    ).to(DEVICE)
+    model, optimizer = build_model_and_optimizer(dataset_name, in_channels)
 
     criterion = BCEDiceLoss(pos_weight=pos_weight).to(DEVICE)
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
     output_dir = os.path.join(MODEL_OUTPUT_DIR, dataset_name)
     os.makedirs(output_dir, exist_ok=True)
@@ -268,6 +333,8 @@ def train_on_dataset(dataset_name, in_channels):
 
     for epoch in range(1, EPOCHS + 1):
         start_time = time.time()
+
+        maybe_unfreeze_skysense_backbone(model, optimizer, epoch)
 
         train_desc = f"[{dataset_name}] Epoch {epoch}/{EPOCHS} (train)"
         val_desc = f"[{dataset_name}] Epoch {epoch}/{EPOCHS} (val)"
@@ -377,7 +444,9 @@ def main():
 
     print("Training configuration loaded")
     print("Device:", DEVICE)
-    print("Train sites:", TRAIN_SITES)
+    print("Train site pool:", TRAIN_SITES)
+    print("  Fit sites (tiles used for training):", FIT_SITES)
+    print("  Validation sites (held out entirely, not in training):", VAL_SITES)
     print("Test sites (held out, not used here):", TEST_SITES)
     print("Epochs:", EPOCHS, "| Batch size:", BATCH_SIZE, "| Learning rate:", LEARNING_RATE, "| Weight decay:", WEIGHT_DECAY)
 
