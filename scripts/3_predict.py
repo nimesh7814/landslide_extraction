@@ -35,19 +35,13 @@ from config import (
     DATASET_DIR,
     MODEL_OUTPUT_DIR,
     PREDICT_OUTPUT_DIR,
-    ENCODER_CHANNELS,
-    DECODER_CHANNELS,
-    BOTTLENECK_CHANNELS,
     OUTPUT_CHANNELS,
     DEVICE,
     RANDOM_SEED,
-    MODEL_ARCHITECTURE,
-    DOFA_VARIANT,
-    DOFA_CHECKPOINT_DIR,
-    DOFA_WAVELENGTHS
+    ENCODER,
+    ENCODER_WEIGHTS
 )
-from model import UNet
-from dofa_model import DOFAUNet
+from model import LandslideUNet
 from dataset import list_tiles
 from metrics import raw_confusion_counts, metrics_from_confusion
 from plotting import plot_confusion_matrix
@@ -123,9 +117,7 @@ def select_datasets(model_number):
 
 
 def parse_tile_filename(image_path):
-    """Recovers the site name and tile number from a tile filename such
-    as 'site_01_23.npy' -> ('site_01', 23)."""
-
+    # Recovers the site name and tile number from a filename, e.g. 'site_01_23.npy' -> ('site_01', 23).
     filename = os.path.basename(image_path)
     stem = filename[:-len(".npy")]
     parts = stem.split("_")
@@ -137,11 +129,8 @@ def parse_tile_filename(image_path):
 
 
 def load_tile_geometry(dataset_name, site_name):
-    """Loads the per-site tile shapefile (written by
-    1_create_train_dataset.py into that dataset variant's own 'tiles'
-    folder) and returns a dict mapping tile number to its
-    (left, bottom, right, top) bounds, plus the CRS."""
-
+    # Loads the per-site tile shapefile written by 1_create_train_dataset.py and returns a
+    # dict mapping tile number to (left, bottom, right, top) bounds, plus the CRS.
     cache_key = (dataset_name, site_name)
 
     if cache_key in _tile_geometry_cache:
@@ -177,13 +166,8 @@ def load_tile_geometry(dataset_name, site_name):
 
 
 def write_georeferenced_tile(array, dataset_name, site_name, tile_no, output_dir, suffix):
-    """Writes a single tile -- 2D single-band, or 3D band-first
-    multi-band -- as a georeferenced GeoTIFF using that tile's
-    real-world bounds recovered from that dataset variant's tile
-    shapefile. Always tagged with EPSG:{FULL_SITE_CRS_EPSG} (this
-    project's known CRS), regardless of what the source orthomosaic
-    itself reports."""
-
+    # Writes a single tile (2D single-band or 3D band-first multi-band) as a georeferenced
+    # GeoTIFF using its real-world bounds, always tagged with this project's known CRS.
     bounds_by_tile, _ = load_tile_geometry(dataset_name, site_name)
 
     if tile_no not in bounds_by_tile:
@@ -222,10 +206,7 @@ def write_georeferenced_tile(array, dataset_name, site_name, tile_no, output_dir
 
 
 def save_predicted_mask_tif(pred_mask, dataset_name, site_name, tile_no, output_dir):
-    """Writes the predicted mask as a georeferenced GeoTIFF (EPSG:5235),
-    using the tile's real-world bounds recovered from that dataset
-    variant's tile shapefile."""
-
+    # Writes the predicted mask as a georeferenced GeoTIFF (EPSG:5235).
     tif_path = write_georeferenced_tile(
         (pred_mask * 255).astype("uint8"),
         dataset_name, site_name, tile_no, output_dir, "pred_mask"
@@ -238,9 +219,7 @@ def save_predicted_mask_tif(pred_mask, dataset_name, site_name, tile_no, output_
 
 
 def mosaic_tiles(tif_paths):
-    """Merges a list of individually georeferenced tile GeoTIFFs into one
-    seamless array + rasterio profile covering their combined extent."""
-
+    # Merges individually georeferenced tile GeoTIFFs into one seamless array + rasterio profile.
     with ExitStack() as open_files:
         sources = [open_files.enter_context(rasterio.open(path)) for path in tif_paths]
 
@@ -262,11 +241,7 @@ def save_mosaic_tif(mosaic_array, profile, path):
 
 
 def _downsample_for_display(array_2d, max_dim=2000, is_mask=False):
-    """Shrinks a full-site array before plotting, so the overview PNG
-    stays a reasonable size even when the stitched site is huge. Uses
-    nearest-neighbor for masks (keeps them binary) and area averaging
-    for the input image."""
-
+    # Shrinks a full-site array before plotting; nearest-neighbor for masks, area averaging for images.
     height, width = array_2d.shape[:2]
     scale = min(1.0, max_dim / max(height, width))
 
@@ -281,10 +256,7 @@ def _downsample_for_display(array_2d, max_dim=2000, is_mask=False):
 
 
 def plot_full_site_overview(input_mosaic, true_mask_mosaic, pred_mosaic, dataset_name, site_name, output_dir):
-    """Saves a single-row (input orthomosaic / true mask / predicted
-    landslide mask) overview figure for the whole, stitched site -- the
-    full-site counterpart to plot_prediction_grid's per-tile samples."""
-
+    # Saves a single-row (input / true mask / predicted mask) overview figure for the whole stitched site.
     display_image = np.transpose(input_mosaic, (1, 2, 0)).astype(np.float32) / 255.0
     display_image = _downsample_for_display(display_image)
     display_image = np.clip(display_image, 0.0, 1.0)
@@ -317,20 +289,9 @@ def plot_full_site_overview(input_mosaic, true_mask_mosaic, pred_mosaic, dataset
 
 
 def export_full_site_mask(model, dataset_name, site_name, pairs, output_dir):
-    """Runs inference on every tile in `pairs` (the full set of tiles for
-    this site, not just the handful used for the sample grid). From that:
-      - stitches the predicted tiles into one seamless, EPSG:5235
-        landslide mask GeoTIFF covering the whole site
-      - aggregates pixel-wise TP/FP/FN/TN across every tile, giving
-        dataset-wide accuracy/precision/recall/F1(Dice)/IoU plus a
-        confusion matrix plot for this site
-      - stitches the input image and true mask too, purely to build a
-        full-site overview PNG (input orthomosaic / true mask /
-        predicted mask)
-
-    Returns a metrics dict for this site, or None if no tiles could be
-    georeferenced."""
-
+    # Runs inference on every tile of this site, stitches predictions into one full-site GeoTIFF,
+    # aggregates a site-wide confusion matrix/metrics, and saves an overview PNG. Returns the
+    # metrics dict, or None if no tiles could be georeferenced.
     tiles_dir = os.path.join(output_dir, f"{site_name}_tiles")
     os.makedirs(tiles_dir, exist_ok=True)
 
@@ -426,11 +387,8 @@ def export_full_site_mask(model, dataset_name, site_name, pairs, output_dir):
 
 
 def create_mask(logits, threshold=0.5):
-    """Converts raw model logits into a binary single-channel mask.
-    This plays the same role as argmax-based mask creation for
-    multi-class models, but for binary segmentation a sigmoid +
-    threshold is the correct equivalent."""
-
+    # Converts raw logits into a binary mask via sigmoid + threshold (binary segmentation's
+    # equivalent of argmax for multi-class models).
     probs = torch.sigmoid(logits)
     mask = (probs > threshold).float()
 
@@ -438,10 +396,7 @@ def create_mask(logits, threshold=0.5):
 
 
 def plot_prediction_grid(rows, dataset_name, site_name, output_dir):
-    """Plots a grid of (input image, true mask, predicted mask) rows,
-    one row per sampled tile, and saves it as a single overview figure
-    for the site. Column headers are only shown on the top row."""
-
+    # Plots a grid of (input, true mask, predicted mask) rows, one row per sampled tile.
     num_rows = len(rows)
 
     fig, axes = plt.subplots(num_rows, 3, figsize=(12, 4 * num_rows))
@@ -479,9 +434,7 @@ def plot_prediction_grid(rows, dataset_name, site_name, output_dir):
 
 
 def save_metrics_csv(rows, path):
-    """Writes the per-site accuracy/precision/recall/F1(Dice)/IoU (and
-    raw TP/FP/FN/TN) rows out to a CSV file."""
-
+    # Writes the per-site accuracy/precision/recall/F1(Dice)/IoU (and raw TP/FP/FN/TN) rows to a CSV.
     if not rows:
         return
 
@@ -502,9 +455,7 @@ def _format_value(value, fmt):
 
 
 def print_metrics_table(title, rows):
-    """Prints a simple aligned ASCII table of per-site prediction
-    metrics to the console."""
-
+    # Prints a simple aligned ASCII table of per-site prediction metrics.
     columns = [
         ("site", "Site", None),
         ("accuracy", "Accuracy", ".4f"),
@@ -533,29 +484,15 @@ def print_metrics_table(title, rows):
 
 
 def load_model(dataset_name, in_channels):
-    architecture = MODEL_ARCHITECTURE.get(dataset_name, "unet")
-
-    # freeze_backbone/differential-LR settings don't matter here (eval
-    # mode, no optimizer) -- DOFAUNet still needs its constructor args
-    # to build the right-shaped decoder, but every weight, frozen or
-    # not, gets overwritten by the fine-tuned best_model.pth loaded
-    # just below anyway.
-    if architecture == "dofa":
-        model = DOFAUNet(
-            wavelengths=DOFA_WAVELENGTHS[dataset_name],
-            checkpoint_dir=DOFA_CHECKPOINT_DIR,
-            variant=DOFA_VARIANT,
-            out_channels=OUTPUT_CHANNELS,
-            freeze_backbone=False
-        ).to(DEVICE)
-    else:
-        model = UNet(
-            in_channels=in_channels,
-            out_channels=OUTPUT_CHANNELS,
-            encoder_channels=ENCODER_CHANNELS,
-            decoder_channels=DECODER_CHANNELS,
-            bottleneck_channels=BOTTLENECK_CHANNELS
-        ).to(DEVICE)
+    # freeze_encoder doesn't matter here (eval mode, no optimizer) -- every weight, frozen or
+    # not, gets overwritten by the fine-tuned best_model.pth loaded just below anyway.
+    model = LandslideUNet(
+        in_channels=in_channels,
+        out_channels=OUTPUT_CHANNELS,
+        encoder_name=ENCODER,
+        encoder_weights=None,
+        freeze_encoder=False
+    ).to(DEVICE)
 
     checkpoint_path = os.path.join(MODEL_OUTPUT_DIR, dataset_name, "best_model.pth")
 
@@ -572,29 +509,17 @@ def load_model(dataset_name, in_channels):
 
 
 def build_prediction_metadata(dataset_name, in_channels, num_samples, sites, full_site):
-    """Captures the settings this prediction run actually used, so
-    prediction_metrics.json is self-documenting -- which model
-    architecture, which checkpoint, which sites, sample count, and
-    whether full-site mode was on -- without needing to cross-reference
-    config.py or the command line later."""
-
-    architecture = MODEL_ARCHITECTURE.get(dataset_name, "unet")
-
-    metadata = {
+    # Captures the settings this run used, so prediction_metrics.json is self-documenting.
+    return {
         "dataset": dataset_name,
         "in_channels": in_channels,
         "num_samples_per_site": num_samples,
         "sites": sites,
         "full_site": full_site,
-        "model_architecture": architecture,
+        "encoder": ENCODER,
+        "encoder_weights": ENCODER_WEIGHTS,
         "checkpoint_path": os.path.join(MODEL_OUTPUT_DIR, dataset_name, "best_model.pth")
     }
-
-    if architecture == "dofa":
-        metadata["dofa_variant"] = DOFA_VARIANT
-        metadata["dofa_wavelengths"] = DOFA_WAVELENGTHS[dataset_name]
-
-    return metadata
 
 
 def show_predictions(dataset_name, in_channels, num_samples, sites, full_site=False):

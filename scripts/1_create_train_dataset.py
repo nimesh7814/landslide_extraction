@@ -1,11 +1,8 @@
 import os
 
-# Some systems (e.g. with PostgreSQL/PostGIS installed) set PROJ_LIB /
-# PROJ_DATA globally, pointing to an older, incompatible proj.db. This
-# breaks rasterio's CRS lookups (e.g. CRS.from_epsg()) since it then
-# tries to use that database instead of its own bundled one. Clearing
-# these before rasterio is imported lets it fall back to its own
-# bundled PROJ database.
+# Some systems (e.g. with PostgreSQL/PostGIS installed) set PROJ_LIB/PROJ_DATA globally to an
+# incompatible proj.db, which breaks rasterio's CRS lookups. Clearing these before rasterio is
+# imported lets it fall back to its own bundled PROJ database.
 os.environ.pop("PROJ_LIB", None)
 os.environ.pop("PROJ_DATA", None)
 
@@ -20,172 +17,70 @@ import shapefile
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from rasterio.features import rasterize
-from rasterio.windows import (
-    Window,
-    bounds as window_bounds,
-    from_bounds
-)
+from rasterio.windows import Window, bounds as window_bounds, from_bounds
 from tqdm import tqdm
-
 
 # PATHS
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
 DATA_DIR = os.path.join(SCRIPT_DIR, "..", "data")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "..", "output", "1_training_datasets")
 
-OUTPUT_DIR = os.path.join(
-    SCRIPT_DIR,
-    "..",
-    "output",
-    "1_training_datasets"
-)
-
-# Where the dataset-wide (all 12 sites) min/max normalization ranges
-# are cached, so they only need to be computed once and stay
-# consistent across every run regardless of --site/--model filtering.
+# Cached dataset-wide (all 12 sites) min/max normalization ranges, computed once and reused
+# consistently across every run regardless of --site/--model filtering.
 NORMALIZATION_RANGES_PATH = os.path.join(OUTPUT_DIR, "global_normalization_ranges.json")
-
 
 # SETTINGS
 TARGET_SIZE = 512
-
 SITE_START = 1
 SITE_END = 12
 
-# Fallback CRS (EPSG code) used for the tile shapefiles when a site's
-# orthomosaic has no CRS embedded in its GeoTIFF metadata. Site data
-# for this project is in Sri Lanka, so this is set to SLD99 / Sri
-# Lanka Grid 1999.
+# Fallback CRS (EPSG code) for tile shapefiles when a site's orthomosaic has no embedded CRS.
+# Site data for this project is in Sri Lanka, so this is SLD99 / Sri Lanka Grid 1999.
 FALLBACK_CRS_EPSG = 5235
 
-# Some annotation shapefiles are full-coverage layers with a 0/1
-# attribute distinguishing landslide (1) from non-landslide (0)
-# polygons, rather than containing only landslide polygons. Set
-# ANNOTATION_FIELD_NAME to that attribute's field name to filter to
-# just the landslide polygons when rasterizing the mask. Leave as
-# None to auto-detect (only works when the shapefile has exactly one
-# non-system field) -- auto-detection prints what it found, so check
-# that output the first time you run this.
+# Some annotation shapefiles are full-coverage layers with a 0/1 attribute distinguishing
+# landslide (1) from non-landslide (0) polygons. Set to that field's name to filter to just the
+# landslide polygons; leave as None to auto-detect (only works with exactly one non-system field).
 ANNOTATION_FIELD_NAME = "value"
 ANNOTATION_POSITIVE_VALUE = 1
 
-
 DATASETS = {
-
-    "01_ortho_dataset":
-    [
-        "orthomosaic"
-    ],
-
-    "02_ortho_dtm_dataset":
-    [
-        "orthomosaic",
-        "dtm"
-    ],
-
-    "03_ortho_dtm_hillshade_dataset":
-    [
-        "orthomosaic",
-        "dtm",
-        "hillshade"
-    ],
-
-    "04_ortho_dtm_hillshade_slope_dataset":
-    [
-        "orthomosaic",
-        "dtm",
-        "hillshade",
-        "slope"
-    ]
-
+    "01_ortho_dataset": ["orthomosaic"],
+    "02_ortho_dtm_dataset": ["orthomosaic", "dtm"],
+    "03_ortho_hillshade_dataset": ["orthomosaic", "hillshade"],
+    "04_ortho_slope_dataset": ["orthomosaic", "slope"]
 }
 
 
 # FUNCTIONS
 def get_files(site):
-
     return {
-
-        "orthomosaic":
-        os.path.join(
-            DATA_DIR,
-            f"site_{site:02d}_orthomosaic.tif"
-        ),
-
-        "dtm":
-        os.path.join(
-            DATA_DIR,
-            f"site_{site:02d}_dtm.tif"
-        ),
-
-        "hillshade":
-        os.path.join(
-            DATA_DIR,
-            f"site_{site:02d}_hillshade.tif"
-        ),
-
-        "slope":
-        os.path.join(
-            DATA_DIR,
-            f"site_{site:02d}_slope.tif"
-        ),
-
-        "mask":
-        os.path.join(
-            DATA_DIR,
-            f"site_{site:02d}_mask.tif"
-        ),
-
-        "annotation":
-        os.path.join(
-            DATA_DIR,
-            f"site_{site:02d}_landslide_annotation.shp"
-        ),
-
-        "footprint":
-        os.path.join(
-            DATA_DIR,
-            f"site_{site:02d}_footprint.shp"
-        )
-
+        "orthomosaic": os.path.join(DATA_DIR, f"site_{site:02d}_orthomosaic.tif"),
+        "dtm": os.path.join(DATA_DIR, f"site_{site:02d}_dtm.tif"),
+        "hillshade": os.path.join(DATA_DIR, f"site_{site:02d}_hillshade.tif"),
+        "slope": os.path.join(DATA_DIR, f"site_{site:02d}_slope.tif"),
+        "mask": os.path.join(DATA_DIR, f"site_{site:02d}_mask.tif"),
+        "annotation": os.path.join(DATA_DIR, f"site_{site:02d}_landslide_annotation.shp"),
+        "footprint": os.path.join(DATA_DIR, f"site_{site:02d}_footprint.shp")
     }
 
 
 def read_geometries(path, field_name=None, positive_value=None):
-    """Reads geometries from a shapefile.
-
-    If field_name is None, every shape is returned unfiltered (used
-    for the footprint shapefile, where all polygons should count).
-
-    If field_name is given, only shapes whose attribute at that field
-    equals positive_value are returned (used for annotation shapefiles
-    that are a full-coverage layer with a 0/1 landslide attribute,
-    rather than containing only landslide polygons)."""
-
+    # Reads geometries from a shapefile. field_name=None returns every shape unfiltered (the
+    # footprint case); otherwise only shapes whose field_name attribute equals positive_value
+    # are returned (the full-coverage 0/1 annotation-layer case).
     if not os.path.isfile(path):
-        raise FileNotFoundError(
-            f"Geometry file is missing: {path}"
-        )
+        raise FileNotFoundError(f"Geometry file is missing: {path}")
 
     with shapefile.Reader(path) as source:
         if field_name is None:
-            geometries = [
-                shape.__geo_interface__
-                for shape in source.iterShapes()
-                if shape.points
-            ]
+            geometries = [shape.__geo_interface__ for shape in source.iterShapes() if shape.points]
 
         else:
-            available_fields = [
-                field[0] for field in source.fields
-                if field[0] != "DeletionFlag"
-            ]
+            available_fields = [field[0] for field in source.fields if field[0] != "DeletionFlag"]
 
             if field_name not in available_fields:
-                raise ValueError(
-                    f"Field '{field_name}' not found in {path}. "
-                    f"Available fields: {available_fields}"
-                )
+                raise ValueError(f"Field '{field_name}' not found in {path}. Available fields: {available_fields}")
 
             geometries = []
             total_features = 0
@@ -204,35 +99,24 @@ def read_geometries(path, field_name=None, positive_value=None):
                     geometries.append(shape.__geo_interface__)
                     matched_features += 1
 
-            print(
-                f"  {os.path.basename(path)}: field '{field_name}', "
-                f"{matched_features}/{total_features} feature(s) match "
-                f"value={positive_value}"
-            )
+            print(f"  {os.path.basename(path)}: field '{field_name}', "
+                  f"{matched_features}/{total_features} feature(s) match value={positive_value}")
 
     if not geometries:
         detail = f" matching {field_name}=={positive_value}" if field_name else ""
-        raise ValueError(
-            f"No geometries found in {path}{detail}"
-        )
+        raise ValueError(f"No geometries found in {path}{detail}")
 
     return geometries
 
 
 def resolve_annotation_field_name(path):
-    """Resolves which attribute field marks landslide polygons in the
-    annotation shapefile. Uses ANNOTATION_FIELD_NAME if set; otherwise
-    auto-detects only when the shapefile has exactly one non-system
-    field, and prints what it found so you can verify it."""
-
+    # Resolves the attribute field marking landslide polygons: ANNOTATION_FIELD_NAME if set,
+    # otherwise auto-detected only when the shapefile has exactly one non-system field.
     if ANNOTATION_FIELD_NAME is not None:
         return ANNOTATION_FIELD_NAME
 
     with shapefile.Reader(path) as source:
-        available_fields = [
-            field[0] for field in source.fields
-            if field[0] != "DeletionFlag"
-        ]
+        available_fields = [field[0] for field in source.fields if field[0] != "DeletionFlag"]
 
     if len(available_fields) == 1:
         field_name = available_fields[0]
@@ -247,7 +131,6 @@ def resolve_annotation_field_name(path):
 
 
 def create_mask_if_missing(files):
-
     mask_path = files["mask"]
 
     if os.path.isfile(mask_path):
@@ -257,41 +140,22 @@ def create_mask_if_missing(files):
     orthomosaic_path = files["orthomosaic"]
 
     if not os.path.isfile(annotation_path):
-        raise FileNotFoundError(
-            "Cannot create mask because the annotation "
-            f"file is missing: {annotation_path}"
-        )
+        raise FileNotFoundError(f"Cannot create mask because the annotation file is missing: {annotation_path}")
 
     if not os.path.isfile(orthomosaic_path):
-        raise FileNotFoundError(
-            "Cannot create mask because the orthomosaic "
-            f"file is missing: {orthomosaic_path}"
-        )
+        raise FileNotFoundError(f"Cannot create mask because the orthomosaic file is missing: {orthomosaic_path}")
 
-    print(
-        "Mask not found; rasterizing:",
-        annotation_path
-    )
+    print("Mask not found; rasterizing:", annotation_path)
 
     temporary_mask_path = f"{mask_path}.tmp"
 
     annotation_field = resolve_annotation_field_name(annotation_path)
-    geometries = read_geometries(
-        annotation_path,
-        field_name=annotation_field,
-        positive_value=ANNOTATION_POSITIVE_VALUE
-    )
+    geometries = read_geometries(annotation_path, field_name=annotation_field, positive_value=ANNOTATION_POSITIVE_VALUE)
 
     with rasterio.open(orthomosaic_path) as reference:
         mask = rasterize(
-            (
-                (geometry, 255)
-                for geometry in geometries
-            ),
-            out_shape=(
-                reference.height,
-                reference.width
-            ),
+            ((geometry, 255) for geometry in geometries),
+            out_shape=(reference.height, reference.width),
             transform=reference.transform,
             fill=0,
             dtype=np.uint8
@@ -311,17 +175,10 @@ def create_mask_if_missing(files):
         )
 
         try:
-            with rasterio.open(
-                temporary_mask_path,
-                "w",
-                **profile
-            ) as destination:
+            with rasterio.open(temporary_mask_path, "w", **profile) as destination:
                 destination.write(mask, 1)
 
-            os.replace(
-                temporary_mask_path,
-                mask_path
-            )
+            os.replace(temporary_mask_path, mask_path)
 
         finally:
             if os.path.exists(temporary_mask_path):
@@ -331,27 +188,17 @@ def create_mask_if_missing(files):
 
 
 def find_best_tile_positions(files):
-
     footprint_path = files["footprint"]
     orthomosaic_path = files["orthomosaic"]
 
     geometries = read_geometries(footprint_path)
 
-    print(
-        "Finding best 512 x 512 grid inside:",
-        footprint_path
-    )
+    print("Finding best 512 x 512 grid inside:", footprint_path)
 
     with rasterio.open(orthomosaic_path) as reference:
         footprint = rasterize(
-            (
-                (geometry, 1)
-                for geometry in geometries
-            ),
-            out_shape=(
-                reference.height,
-                reference.width
-            ),
+            ((geometry, 1) for geometry in geometries),
+            out_shape=(reference.height, reference.width),
             transform=reference.transform,
             fill=0,
             dtype=np.uint8
@@ -361,31 +208,13 @@ def find_best_tile_positions(files):
     valid_width = footprint.shape[1] - TARGET_SIZE + 1
 
     if valid_height <= 0 or valid_width <= 0:
-        raise ValueError(
-            "The footprint is smaller than one "
-            f"{TARGET_SIZE} x {TARGET_SIZE} tile"
-        )
+        raise ValueError(f"The footprint is smaller than one {TARGET_SIZE} x {TARGET_SIZE} tile")
 
-    # With the anchor at the top-left, erosion marks every
-    # possible tile origin whose full square is in the footprint.
-
-    kernel = np.ones(
-        (TARGET_SIZE, TARGET_SIZE),
-        dtype=np.uint8
-    )
-
-    valid_origins = cv2.erode(
-        footprint,
-        kernel,
-        anchor=(0, 0),
-        borderType=cv2.BORDER_CONSTANT,
-        borderValue=0
-    )
-
-    valid_origins = valid_origins[
-        :valid_height,
-        :valid_width
-    ]
+    # With the anchor at the top-left, erosion marks every possible tile origin whose full square
+    # is inside the footprint.
+    kernel = np.ones((TARGET_SIZE, TARGET_SIZE), dtype=np.uint8)
+    valid_origins = cv2.erode(footprint, kernel, anchor=(0, 0), borderType=cv2.BORDER_CONSTANT, borderValue=0)
+    valid_origins = valid_origins[:valid_height, :valid_width]
 
     del footprint
     del kernel
@@ -398,44 +227,18 @@ def find_best_tile_positions(files):
     full_x_width = full_x_blocks * TARGET_SIZE
     remainder = valid_width - full_x_width
 
-    for y_offset in tqdm(
-            range(min(TARGET_SIZE, valid_height)),
-            desc="Optimizing tile grid",
-            unit="offset",
-            leave=False
-    ):
-
-        sampled_rows = valid_origins[
-            y_offset::TARGET_SIZE,
-            :
-        ]
-
-        counts = np.zeros(
-            TARGET_SIZE,
-            dtype=np.int64
-        )
+    for y_offset in tqdm(range(min(TARGET_SIZE, valid_height)), desc="Optimizing tile grid", unit="offset", leave=False):
+        sampled_rows = valid_origins[y_offset::TARGET_SIZE, :]
+        counts = np.zeros(TARGET_SIZE, dtype=np.int64)
 
         if full_x_blocks:
             counts += np.count_nonzero(
-                sampled_rows[
-                    :,
-                    :full_x_width
-                ].reshape(
-                    sampled_rows.shape[0],
-                    full_x_blocks,
-                    TARGET_SIZE
-                ),
+                sampled_rows[:, :full_x_width].reshape(sampled_rows.shape[0], full_x_blocks, TARGET_SIZE),
                 axis=(0, 1)
             )
 
         if remainder:
-            counts[:remainder] += np.count_nonzero(
-                sampled_rows[
-                    :,
-                    full_x_width:
-                ],
-                axis=0
-            )
+            counts[:remainder] += np.count_nonzero(sampled_rows[:, full_x_width:], axis=0)
 
         x_offset = int(np.argmax(counts))
         count = int(counts[x_offset])
@@ -446,46 +249,26 @@ def find_best_tile_positions(files):
             best_y_offset = y_offset
 
     if best_count == 0:
-        raise ValueError(
-            "No complete "
-            f"{TARGET_SIZE} x {TARGET_SIZE} "
-            "tile fits inside the footprint"
-        )
+        raise ValueError(f"No complete {TARGET_SIZE} x {TARGET_SIZE} tile fits inside the footprint")
 
     positions = [
         (x, y)
-        for y in range(
-            best_y_offset,
-            valid_height,
-            TARGET_SIZE
-        )
-        for x in range(
-            best_x_offset,
-            valid_width,
-            TARGET_SIZE
-        )
+        for y in range(best_y_offset, valid_height, TARGET_SIZE)
+        for x in range(best_x_offset, valid_width, TARGET_SIZE)
         if valid_origins[y, x]
     ]
 
     del valid_origins
 
-    print(
-        "Selected",
-        len(positions),
-        "fully contained tiles with grid offset",
-        f"(x={best_x_offset}, y={best_y_offset})"
-    )
+    print("Selected", len(positions), "fully contained tiles with grid offset", f"(x={best_x_offset}, y={best_y_offset})")
 
     return positions
 
 
 def write_tile_index_shapefile(files, dataset_name, site_name, positions):
-    """Writes one shapefile per site with a polygon for every tile in
-    the grid, storing the tile number and center coordinates. Written
-    into the dataset variant's own 'tiles' folder so it survives
-    alongside that variant even if 'images'/'masks' are later deleted
-    to free disk space."""
-
+    # Writes one shapefile per site with a polygon per tile (tile number + center coordinates),
+    # into the dataset variant's own 'tiles' folder so it survives even if images/masks are later
+    # deleted to free disk space.
     orthomosaic_path = files["orthomosaic"]
 
     tiles_dir = os.path.join(OUTPUT_DIR, dataset_name, "tiles")
@@ -497,23 +280,16 @@ def write_tile_index_shapefile(files, dataset_name, site_name, positions):
         transform = reference.transform
         embedded_crs = reference.crs
 
-        # Site data's true CRS is known (EPSG:5235 / SLD99 Sri Lanka
-        # Grid 1999). Drone/photogrammetry outputs often carry no CRS,
-        # or an arbitrary local one, so this is applied unconditionally
-        # rather than only when embedded_crs is None.
+        # Site data's true CRS is known (EPSG:5235 / SLD99 Sri Lanka Grid 1999). Drone/
+        # photogrammetry outputs often carry no CRS or an arbitrary local one, so this is applied
+        # unconditionally rather than only when embedded_crs is None.
         crs = CRS.from_epsg(FALLBACK_CRS_EPSG)
 
         if embedded_crs is None:
-            print(
-                f"  Note: {orthomosaic_path} has no CRS embedded. "
-                f"Assigning EPSG:{FALLBACK_CRS_EPSG} for the tile shapefile."
-            )
+            print(f"  Note: {orthomosaic_path} has no CRS embedded. Assigning EPSG:{FALLBACK_CRS_EPSG} for the tile shapefile.")
         elif embedded_crs != crs:
-            print(
-                f"  Note: {orthomosaic_path} reports a different embedded CRS "
-                f"({embedded_crs}). Overriding with EPSG:{FALLBACK_CRS_EPSG} "
-                "for the tile shapefile, since that is this project's known CRS."
-            )
+            print(f"  Note: {orthomosaic_path} reports a different embedded CRS ({embedded_crs}). "
+                  f"Overriding with EPSG:{FALLBACK_CRS_EPSG} for the tile shapefile, since that is this project's known CRS.")
 
         with shapefile.Writer(shp_path, shapeType=shapefile.POLYGON) as writer:
             writer.field("tile_no", "N")
@@ -522,26 +298,11 @@ def write_tile_index_shapefile(files, dataset_name, site_name, positions):
             writer.field("center_y", "F", decimal=3)
 
             for tile_no, (x, y) in enumerate(positions):
-                left, bottom, right, top = window_bounds(
-                    Window(x, y, TARGET_SIZE, TARGET_SIZE),
-                    transform
-                )
-
-                polygon = [
-                    (left, top),
-                    (right, top),
-                    (right, bottom),
-                    (left, bottom),
-                    (left, top)
-                ]
+                left, bottom, right, top = window_bounds(Window(x, y, TARGET_SIZE, TARGET_SIZE), transform)
+                polygon = [(left, top), (right, top), (right, bottom), (left, bottom), (left, top)]
 
                 writer.poly([polygon])
-                writer.record(
-                    tile_no,
-                    site_name,
-                    (left + right) / 2.0,
-                    (top + bottom) / 2.0
-                )
+                writer.record(tile_no, site_name, (left + right) / 2.0, (top + bottom) / 2.0)
 
     prj_path = os.path.join(tiles_dir, f"{site_name}_tiles.prj")
     with open(prj_path, "w") as prj_file:
@@ -550,31 +311,12 @@ def write_tile_index_shapefile(files, dataset_name, site_name, positions):
     print("Saved tile index shapefile:", shp_path)
 
 
-
 def create_output_folder(dataset):
+    img_folder = os.path.join(OUTPUT_DIR, dataset, "images")
+    mask_folder = os.path.join(OUTPUT_DIR, dataset, "masks")
 
-    img_folder = os.path.join(
-        OUTPUT_DIR,
-        dataset,
-        "images"
-    )
-
-    mask_folder = os.path.join(
-        OUTPUT_DIR,
-        dataset,
-        "masks"
-    )
-
-
-    os.makedirs(
-        img_folder,
-        exist_ok=True
-    )
-
-    os.makedirs(
-        mask_folder,
-        exist_ok=True
-    )
+    os.makedirs(img_folder, exist_ok=True)
+    os.makedirs(mask_folder, exist_ok=True)
 
     return img_folder, mask_folder
 
@@ -606,24 +348,10 @@ def load_global_normalization_ranges(path):
 
 
 def compute_global_normalization_ranges(bands_needed, normalization_cache):
-    """Ensures normalization_cache has one (band_name, band_index) ->
-    (min, max) range per band needed, shared across every site.
-
-    Elevation-derived channels (DTM, hillshade, slope) previously had
-    their min/max computed per-site, per-file -- so a normalized value
-    of e.g. 0.5 meant something different from one site's DTM to the
-    next. That's fixed here by always scanning every one of the
-    project's SITE_START-SITE_END sites (never just the ones selected
-    via --site) and merging into one dataset-wide range per band, so
-    a site's normalized values stay on a consistent physical scale
-    project-wide, and are identical regardless of which subset of
-    sites/models any single run happens to process.
-
-    Results are cached to NORMALIZATION_RANGES_PATH so this expensive
-    full scan only has to run once; later runs just reuse it (unless a
-    newly needed band isn't in the cache yet, in which case only that
-    band gets (re)scanned)."""
-
+    # Ensures normalization_cache has one (band_name, band_index) -> (min, max) range per band,
+    # shared across every site so elevation-derived channels (DTM, hillshade, slope) stay on a
+    # consistent physical scale project-wide, regardless of which --site/--model subset runs.
+    # Cached to NORMALIZATION_RANGES_PATH so the full scan only ever needs to run once.
     cached = load_global_normalization_ranges(NORMALIZATION_RANGES_PATH)
 
     needed_keys = {
@@ -637,16 +365,10 @@ def compute_global_normalization_ranges(bands_needed, normalization_cache):
     if missing_keys:
         missing_bands = sorted({band_name for band_name, _ in missing_keys})
 
-        print(
-            "Computing global normalization ranges for:", missing_bands,
-            f"(scanning all sites {SITE_START}-{SITE_END}, this only needs to happen once)"
-        )
+        print("Computing global normalization ranges for:", missing_bands,
+              f"(scanning all sites {SITE_START}-{SITE_END}, this only needs to happen once)")
 
-        for site in tqdm(
-                range(SITE_START, SITE_END + 1),
-                desc="Scanning global normalization ranges",
-                unit="site"
-        ):
+        for site in tqdm(range(SITE_START, SITE_END + 1), desc="Scanning global normalization ranges", unit="site"):
             files = get_files(site)
 
             for band_name in missing_bands:
@@ -665,18 +387,13 @@ def compute_global_normalization_ranges(bands_needed, normalization_cache):
                             continue
 
                         per_site_cache = {}
-                        site_min, site_max = get_normalization_range(
-                            source, band_index, per_site_cache, band_name
-                        )
+                        site_min, site_max = get_normalization_range(source, band_index, per_site_cache, band_name)
 
                         if key not in cached:
                             cached[key] = (site_min, site_max)
                         else:
                             existing_min, existing_max = cached[key]
-                            cached[key] = (
-                                min(existing_min, site_min),
-                                max(existing_max, site_max)
-                            )
+                            cached[key] = (min(existing_min, site_min), max(existing_max, site_max))
 
         save_global_normalization_ranges(cached, NORMALIZATION_RANGES_PATH)
         print("Saved global normalization ranges ->", NORMALIZATION_RANGES_PATH)
@@ -691,24 +408,13 @@ def compute_global_normalization_ranges(bands_needed, normalization_cache):
         print(f"  {band_name} band {band_index}: [{min_val:.4f}, {max_val:.4f}]")
 
 
-def get_normalization_range(
-        source,
-        band_index,
-        cache,
-        layer_name
-):
-
-    key = (
-        layer_name,
-        band_index
-    )
+def get_normalization_range(source, band_index, cache, layer_name):
+    key = (layer_name, band_index)
 
     if key in cache:
         return cache[key]
 
-    dtype = np.dtype(
-        source.dtypes[band_index - 1]
-    )
+    dtype = np.dtype(source.dtypes[band_index - 1])
 
     if np.issubdtype(dtype, np.integer):
         limits = np.iinfo(dtype)
@@ -719,313 +425,131 @@ def get_normalization_range(
         tags = source.tags(band_index)
 
         try:
-            min_val = float(
-                tags["STATISTICS_MINIMUM"]
-            )
-            max_val = float(
-                tags["STATISTICS_MAXIMUM"]
-            )
+            min_val = float(tags["STATISTICS_MINIMUM"])
+            max_val = float(tags["STATISTICS_MAXIMUM"])
 
-        except (
-            KeyError,
-            TypeError,
-            ValueError
-        ):
+        except (KeyError, TypeError, ValueError):
             min_val = np.inf
             max_val = -np.inf
 
-            blocks = list(
-                source.block_windows(band_index)
-            )
+            blocks = list(source.block_windows(band_index))
 
-            for _, window in tqdm(
-                    blocks,
-                    desc=f"Scanning {layer_name} range",
-                    unit="block",
-                    leave=False
-            ):
-                block = source.read(
-                    band_index,
-                    window=window,
-                    masked=True
-                )
-
+            for _, window in tqdm(blocks, desc=f"Scanning {layer_name} range", unit="block", leave=False):
+                block = source.read(band_index, window=window, masked=True)
                 values = block.compressed()
-                values = values[
-                    np.isfinite(values)
-                ]
+                values = values[np.isfinite(values)]
 
                 if values.size:
-                    min_val = min(
-                        min_val,
-                        float(values.min())
-                    )
-                    max_val = max(
-                        max_val,
-                        float(values.max())
-                    )
+                    min_val = min(min_val, float(values.min()))
+                    max_val = max(max_val, float(values.max()))
 
-            if (
-                not np.isfinite(min_val)
-                or not np.isfinite(max_val)
-            ):
-                raise ValueError(
-                    "No valid pixels found in "
-                    f"{source.name}, band {band_index}"
-                )
+            if not np.isfinite(min_val) or not np.isfinite(max_val):
+                raise ValueError(f"No valid pixels found in {source.name}, band {band_index}")
 
-    cache[key] = (
-        min_val,
-        max_val
-    )
+    cache[key] = (min_val, max_val)
 
     return cache[key]
 
 
-def normalize_tile(
-        tile,
-        min_val,
-        max_val
-):
-
+def normalize_tile(tile, min_val, max_val):
     invalid = np.ma.getmaskarray(tile)
-
-    normalized = np.asarray(
-        tile.filled(min_val),
-        dtype=np.float32
-    )
+    normalized = np.asarray(tile.filled(min_val), dtype=np.float32)
 
     value_range = max_val - min_val
 
     if value_range > 0:
         normalized -= min_val
         normalized /= value_range
-
     else:
         normalized.fill(0)
 
-    np.clip(
-        normalized,
-        0,
-        1,
-        out=normalized
-    )
-
-    normalized[
-        invalid
-        | ~np.isfinite(normalized)
-    ] = 0
+    np.clip(normalized, 0, 1, out=normalized)
+    normalized[invalid | ~np.isfinite(normalized)] = 0
 
     return normalized
 
 
-def read_aligned_tile(
-        source,
-        band_indexes,
-        reference,
-        reference_window
-):
-
+def read_aligned_tile(source, band_indexes, reference, reference_window):
     same_grid = (
         source.width == reference.width
         and source.height == reference.height
-        and source.transform.almost_equals(
-            reference.transform
-        )
+        and source.transform.almost_equals(reference.transform)
     )
 
     if same_grid:
         source_window = reference_window
-
     else:
-        left, bottom, right, top = window_bounds(
-            reference_window,
-            reference.transform
-        )
-
-        source_window = from_bounds(
-            left,
-            bottom,
-            right,
-            top,
-            transform=source.transform
-        )
+        left, bottom, right, top = window_bounds(reference_window, reference.transform)
+        source_window = from_bounds(left, bottom, right, top, transform=source.transform)
 
     return source.read(
         band_indexes,
         window=source_window,
-        out_shape=(
-            len(band_indexes),
-            TARGET_SIZE,
-            TARGET_SIZE
-        ),
+        out_shape=(len(band_indexes), TARGET_SIZE, TARGET_SIZE),
         resampling=Resampling.bilinear,
         boundless=True,
         masked=True
     )
 
 
-
-def create_tiles(
-        files,
-        bands,
-        dataset,
-        site_name,
-        positions,
-        normalization_cache
-):
-
+def create_tiles(files, bands, dataset, site_name, positions, normalization_cache):
     img_folder, mask_folder = create_output_folder(dataset)
 
     with ExitStack() as open_files:
-
-        sources = {
-            band:
-            open_files.enter_context(
-                rasterio.open(files[band])
-            )
-            for band in bands
-        }
-
+        sources = {band: open_files.enter_context(rasterio.open(files[band])) for band in bands}
         reference = sources["orthomosaic"]
 
-        mask_source = open_files.enter_context(
-            rasterio.open(files["mask"])
-        )
+        mask_source = open_files.enter_context(rasterio.open(files["mask"]))
 
         if (
             mask_source.width != reference.width
             or mask_source.height != reference.height
-            or not mask_source.transform.almost_equals(
-                reference.transform
-            )
+            or not mask_source.transform.almost_equals(reference.transform)
         ):
-            raise ValueError(
-                "Mask grid does not match orthomosaic: "
-                f"{files['mask']}"
-            )
+            raise ValueError(f"Mask grid does not match orthomosaic: {files['mask']}")
 
         layer_details = []
 
         for band in bands:
-
             source = sources[band]
 
             if band == "orthomosaic":
                 if source.count < 3:
-                    raise ValueError(
-                        "Orthomosaic must contain at least "
-                        f"three bands: {source.name}"
-                    )
+                    raise ValueError(f"Orthomosaic must contain at least three bands: {source.name}")
 
                 band_indexes = [1, 2, 3]
-
             else:
                 band_indexes = [1]
 
-            ranges = [
-                get_normalization_range(
-                    source,
-                    band_index,
-                    normalization_cache,
-                    band
-                )
-                for band_index in band_indexes
-            ]
+            ranges = [get_normalization_range(source, band_index, normalization_cache, band) for band_index in band_indexes]
 
-            layer_details.append(
-                (
-                    source,
-                    band_indexes,
-                    ranges
-                )
-            )
+            layer_details.append((source, band_indexes, ranges))
 
-
-        for tile_no, (x, y) in enumerate(
-                tqdm(
-                    positions,
-                    desc=f"Writing {dataset}",
-                    unit="tile",
-                    leave=False
-                )
-        ):
-
-            reference_window = Window(
-                x,
-                y,
-                TARGET_SIZE,
-                TARGET_SIZE
-            )
+        for tile_no, (x, y) in enumerate(tqdm(positions, desc=f"Writing {dataset}", unit="tile", leave=False)):
+            reference_window = Window(x, y, TARGET_SIZE, TARGET_SIZE)
 
             channels = []
 
-            for (
-                    source,
-                    band_indexes,
-                    ranges
-            ) in layer_details:
+            for source, band_indexes, ranges in layer_details:
+                data = read_aligned_tile(source, band_indexes, reference, reference_window)
 
-                data = read_aligned_tile(
-                    source,
-                    band_indexes,
-                    reference,
-                    reference_window
-                )
+                for channel, value_range in zip(data, ranges):
+                    channels.append(normalize_tile(channel, *value_range))
 
-                for channel, value_range in zip(
-                        data,
-                        ranges
-                ):
-                    channels.append(
-                        normalize_tile(
-                            channel,
-                            *value_range
-                        )
-                    )
+            img_tile = np.stack(channels, axis=2)
+            mask_tile = mask_source.read(1, window=reference_window)
 
-            img_tile = np.stack(
-                channels,
-                axis=2
-            )
+            img_name = f"{site_name}_{tile_no}.npy"
+            mask_name = f"{site_name}_{tile_no}_m.npy"
 
-            mask_tile = mask_source.read(
-                1,
-                window=reference_window
-            )
-
-            img_name = (
-                f"{site_name}_{tile_no}.npy"
-            )
-
-            mask_name = (
-                f"{site_name}_{tile_no}_m.npy"
-            )
-
-            np.save(
-                os.path.join(
-                    img_folder,
-                    img_name
-                ),
-                img_tile
-            )
-
-            np.save(
-                os.path.join(
-                    mask_folder,
-                    mask_name
-                ),
-                mask_tile
-            )
+            np.save(os.path.join(img_folder, img_name), img_tile)
+            np.save(os.path.join(mask_folder, mask_name), mask_tile)
 
     return len(positions)
 
 
-
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Create tiled training datasets for one or all dataset variants."
-    )
+    parser = argparse.ArgumentParser(description="Create tiled training datasets for one or all dataset variants.")
     parser.add_argument(
         "--model",
         type=int,
@@ -1076,69 +600,34 @@ def main():
     total = 0
     normalization_cache = {}
 
-    bands_needed = sorted({
-        band
-        for bands in datasets_to_create.values()
-        for band in bands
-    })
+    bands_needed = sorted({band for bands in datasets_to_create.values() for band in bands})
 
     compute_global_normalization_ranges(bands_needed, normalization_cache)
 
-    for site in tqdm(
-            sites_to_process,
-            desc="Sites",
-            unit="site"
-    ):
-
+    for site in tqdm(sites_to_process, desc="Sites", unit="site"):
         site_name = f"site_{site:02d}"
 
         print("\nProcessing", site_name)
 
         files = get_files(site)
 
-        # Create the mask from the annotation shapefile when needed
-
+        # Create the mask from the annotation shapefile when needed.
         create_mask_if_missing(files)
 
         positions = find_best_tile_positions(files)
 
-        for dataset, bands in tqdm(
-                datasets_to_create.items(),
-                desc=f"{site_name} datasets",
-                unit="dataset",
-                leave=False
-        ):
+        for dataset, bands in tqdm(datasets_to_create.items(), desc=f"{site_name} datasets", unit="dataset", leave=False):
+            print("Creating:", dataset)
 
-            print(
-                "Creating:",
-                dataset
-            )
-
-            tiles = create_tiles(
-                files,
-                bands,
-                dataset,
-                site_name,
-                positions,
-                normalization_cache
-            )
-
+            tiles = create_tiles(files, bands, dataset, site_name, positions, normalization_cache)
             write_tile_index_shapefile(files, dataset, site_name, positions)
 
-            print(
-                "Tiles:",
-                tiles
-            )
+            print("Tiles:", tiles)
 
             total += tiles
 
-    print("\n====================")
-    print("Finished")
-    print(
-        "Total tiles:",
-        total
-    )
-    print("====================")
+    print("\nFinished")
+    print("Total tiles:", total)
 
 
 if __name__ == "__main__":

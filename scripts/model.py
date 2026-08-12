@@ -1,76 +1,56 @@
-import torch
 import torch.nn as nn
+import segmentation_models_pytorch as smp
 
-def double_conv(in_channels, out_channels):
-    return nn.Sequential(
-        nn.Conv2d(in_channels, out_channels, 3, padding=1),
-        nn.BatchNorm2d(out_channels),
-        nn.ReLU(inplace=True),
-        nn.Conv2d(out_channels, out_channels, 3, padding=1),
-        nn.BatchNorm2d(out_channels),
-        nn.ReLU(inplace=True)
-    )
 
-def up_conv(in_channels, out_channels):
-    return nn.Sequential(
-        nn.ConvTranspose2d(in_channels, out_channels, 2, stride=2),
-        nn.BatchNorm2d(out_channels),
-        nn.ReLU(inplace=True)
-    )
+class LandslideUNet(nn.Module):
+    # UNet with a pretrained ResNet50 (ImageNet) encoder, built via segmentation_models_pytorch.
 
-class UNet(nn.Module):
-    def __init__(self, in_channels, out_channels,
-                 encoder_channels, decoder_channels,
-                 bottleneck_channels):
+    def __init__(
+            self,
+            in_channels,
+            out_channels=1,
+            encoder_name="resnet50",
+            encoder_weights="imagenet",
+            freeze_encoder=True
+    ):
         super().__init__()
 
-        self.enc1 = double_conv(in_channels, encoder_channels[0])
-        self.enc2 = nn.Sequential(nn.MaxPool2d(2),
-                                  double_conv(encoder_channels[0], encoder_channels[1]))
-        self.enc3 = nn.Sequential(nn.MaxPool2d(2),
-                                  double_conv(encoder_channels[1], encoder_channels[2]))
-        self.enc4 = nn.Sequential(nn.MaxPool2d(2),
-                                  double_conv(encoder_channels[2], encoder_channels[3]))
+        self.model = smp.Unet(
+            encoder_name=encoder_name,
+            encoder_weights=encoder_weights,
+            in_channels=in_channels,
+            classes=out_channels
+        )
 
-        self.bottom = nn.Sequential(nn.MaxPool2d(2),
-                                    double_conv(encoder_channels[3], bottleneck_channels))
+        print(f"UNet built (encoder={encoder_name}, weights={encoder_weights}, in_channels={in_channels}).")
 
-        self.up1 = up_conv(bottleneck_channels, bottleneck_channels)
-        self.dec1 = double_conv(bottleneck_channels + encoder_channels[3], decoder_channels[0])
+        if freeze_encoder:
+            self.freeze_encoder()
 
-        self.up2 = up_conv(decoder_channels[0], decoder_channels[0])
-        self.dec2 = double_conv(decoder_channels[0] + encoder_channels[2], decoder_channels[1])
+    def freeze_encoder(self):
+        # Freezes the pretrained encoder so only the decoder + segmentation head train.
+        for parameter in self.model.encoder.parameters():
+            parameter.requires_grad = False
 
-        self.up3 = up_conv(decoder_channels[1], decoder_channels[1])
-        self.dec3 = double_conv(decoder_channels[1] + encoder_channels[1], decoder_channels[2])
+        print("Encoder frozen (decoder+head-only training).")
 
-        self.up4 = up_conv(decoder_channels[2], decoder_channels[2])
-        self.dec4 = double_conv(decoder_channels[2] + encoder_channels[0], decoder_channels[3])
+    def unfreeze_encoder(self):
+        # Unfreezes the encoder for the fine-tuning phase, once the decoder has warmed up.
+        for parameter in self.model.encoder.parameters():
+            parameter.requires_grad = True
 
-        self.output = nn.Conv2d(decoder_channels[3], out_channels, 1)
+        print("Encoder unfrozen (fine-tuning all encoder layers).")
+
+    def differential_param_groups(self, decoder_lr, encoder_lr):
+        # Decoder+head always train at decoder_lr; the encoder trains at the lower encoder_lr,
+        # whether currently frozen or not, so unfreeze_encoder() needs no optimizer changes later.
+        decoder_params = list(self.model.decoder.parameters()) + list(self.model.segmentation_head.parameters())
+        encoder_params = list(self.model.encoder.parameters())
+
+        return [
+            {"params": decoder_params, "lr": decoder_lr},
+            {"params": encoder_params, "lr": encoder_lr}
+        ]
 
     def forward(self, x):
-        e1 = self.enc1(x)
-        e2 = self.enc2(e1)
-        e3 = self.enc3(e2)
-        e4 = self.enc4(e3)
-
-        x = self.bottom(e4)
-
-        x = self.up1(x)
-        x = torch.cat([x, e4], dim=1)
-        x = self.dec1(x)
-
-        x = self.up2(x)
-        x = torch.cat([x, e3], dim=1)
-        x = self.dec2(x)
-
-        x = self.up3(x)
-        x = torch.cat([x, e2], dim=1)
-        x = self.dec3(x)
-
-        x = self.up4(x)
-        x = torch.cat([x, e1], dim=1)
-        x = self.dec4(x)
-
-        return self.output(x)
+        return self.model(x)

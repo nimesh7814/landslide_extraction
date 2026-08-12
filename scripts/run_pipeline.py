@@ -7,8 +7,7 @@ import subprocess
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Needed so "from config import ..." resolves regardless of the
-# directory this script is launched from.
+# Needed so "from config import ..." resolves regardless of the launch directory.
 sys.path.insert(0, SCRIPTS_DIR)
 
 from config import DATASETS, DATASET_DIR
@@ -88,11 +87,7 @@ def run_step(script_name, extra_args):
     print(f"Running: {' '.join(command)}")
     print(f"{'=' * 70}")
 
-    # Some systems (e.g. with PostgreSQL/PostGIS installed) set
-    # PROJ_LIB / PROJ_DATA globally to an incompatible proj.db, which
-    # breaks rasterio's CRS lookups in the child scripts. Stripping
-    # these here too, on top of each script doing it, covers any
-    # subprocess this pipeline spawns.
+    # Strips PROJ_LIB/PROJ_DATA for child processes too (see 1_create_train_dataset.py for why).
     env = os.environ.copy()
     env.pop("PROJ_LIB", None)
     env.pop("PROJ_DATA", None)
@@ -109,14 +104,8 @@ def run_step(script_name, extra_args):
 
 
 def delete_dataset_tiles(model_number):
-    """Permanently deletes only the tiled images/masks for this dataset
-    variant (output/1_training_datasets/<dataset_name>/{images,masks}),
-    using shutil.rmtree (a direct OS-level delete -- this never goes
-    through the Recycle Bin/Trash, on any platform). This frees disk
-    space between models without touching the raw input data or the
-    dataset's own 'tiles/' folder (the per-site georeferencing
-    shapefiles), which is left in place."""
-
+    # Permanently deletes only this dataset variant's tiled images/masks (via shutil.rmtree --
+    # bypasses the Recycle Bin), freeing disk space while leaving 'tiles/' (georeferencing) in place.
     dataset_names = list(DATASETS.keys())
     dataset_name = dataset_names[model_number - 1]
 

@@ -6,9 +6,7 @@ import matplotlib.pyplot as plt
 
 
 def plot_training_curves(history, output_dir):
-    """Saves a 2x3 figure with train/val loss, IoU, Dice, accuracy,
-    precision and recall curves for one dataset variant."""
-
+    # Saves a 2x3 figure with train/val loss, IoU, Dice, accuracy, precision and recall curves.
     epochs = [row["epoch"] for row in history]
 
     def series(key):
@@ -58,9 +56,7 @@ def plot_training_curves(history, output_dir):
 
 
 def plot_confusion_matrix(tp, fp, fn, tn, output_dir, filename="confusion_matrix.png"):
-    """Saves a 2x2 confusion matrix heatmap (pixel counts) for the
-    landslide / non-landslide classes."""
-
+    # Saves a 2x2 confusion matrix heatmap (pixel counts) for the landslide / non-landslide classes.
     matrix = [[tn, fp], [fn, tp]]
     labels = ["Non-landslide", "Landslide"]
 

@@ -1,1 +1,5 @@
-/data/*.tif
+/data
+.venv
+/output
+__pycache__/
+*.log

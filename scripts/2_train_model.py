@@ -21,9 +21,6 @@ from config import (
     EPOCHS,
     LEARNING_RATE,
     WEIGHT_DECAY,
-    ENCODER_CHANNELS,
-    DECODER_CHANNELS,
-    BOTTLENECK_CHANNELS,
     OUTPUT_CHANNELS,
     DEVICE,
     NUM_WORKERS,
@@ -31,16 +28,13 @@ from config import (
     MAX_POS_WEIGHT,
     RANDOM_SEED,
     RANDOM_SAMPLE_PERCENTAGE,
-    MODEL_ARCHITECTURE,
-    DOFA_VARIANT,
-    DOFA_CHECKPOINT_DIR,
-    DOFA_FREEZE_EPOCHS,
-    DOFA_UNFREEZE_BLOCKS,
-    DOFA_BACKBONE_LR,
-    DOFA_WAVELENGTHS
+    EARLY_STOPPING_PATIENCE,
+    ENCODER,
+    ENCODER_WEIGHTS,
+    FREEZE_ENCODER_EPOCHS,
+    ENCODER_LR
 )
-from model import UNet
-from dofa_model import DOFAUNet
+from model import LandslideUNet
 from dataset import list_tiles, subsample_pairs, estimate_positive_ratio, LandslideDataset
 from losses import BCEDiceLoss
 from metrics import binary_metrics, raw_confusion_counts, metrics_from_confusion
@@ -56,9 +50,7 @@ def format_value(value, fmt):
 
 
 def print_table(title, rows, columns):
-    """Prints a simple aligned ASCII table to the console.
-    columns: list of (key, header, format_spec) tuples."""
-
+    # Prints a simple aligned ASCII table; columns is a list of (key, header, format_spec).
     print(f"\n{title}")
 
     widths = []
@@ -114,7 +106,7 @@ def build_dataloaders(dataset_name):
     return train_loader, val_loader, train_pairs
 
 
-def run_epoch(model, loader, criterion, optimizer=None, desc=""):
+def run_epoch(model, loader, criterion, optimizer=None, scaler=None, desc=""):
     is_training = optimizer is not None
     model.train() if is_training else model.eval()
 
@@ -134,12 +126,14 @@ def run_epoch(model, loader, criterion, optimizer=None, desc=""):
             if is_training:
                 optimizer.zero_grad()
 
-            logits = model(images)
-            loss = criterion(logits, masks)
+            with torch.autocast(device_type=DEVICE, enabled=(DEVICE == "cuda")):
+                logits = model(images)
+                loss = criterion(logits, masks)
 
             if is_training:
-                loss.backward()
-                optimizer.step()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
             batch_metrics = binary_metrics(logits, masks)
 
@@ -161,9 +155,7 @@ def run_epoch(model, loader, criterion, optimizer=None, desc=""):
 
 
 def evaluate_confusion(model, loader):
-    """Aggregates raw TP/FP/FN/TN pixel counts across an entire loader,
-    used for the final confusion matrix plot."""
-
+    # Aggregates raw TP/FP/FN/TN pixel counts across a whole loader, for the confusion matrix plot.
     model.eval()
     total_tp = total_fp = total_fn = total_tn = 0.0
 
@@ -196,10 +188,7 @@ def save_history_csv(history, path):
 
 
 def save_history_xlsx(history, path, best_epoch=None):
-    """Exports the full per-epoch history (including train/val loss and
-    every tracked metric) to a formatted Excel workbook, with the best
-    epoch's row highlighted."""
-
+    # Exports the full per-epoch history to a formatted Excel workbook, best epoch's row highlighted.
     if not history:
         return
 
@@ -249,89 +238,42 @@ def save_history_xlsx(history, path, best_epoch=None):
     workbook.save(path)
 
 
-def build_model_and_optimizer(dataset_name, in_channels):
-    """Builds the model + optimizer for one dataset variant, based on
-    MODEL_ARCHITECTURE[dataset_name] ("unet" or "dofa"). DOFA starts
-    with the backbone frozen and uses differential learning rates;
-    plain UNet trains fully from scratch at LEARNING_RATE throughout."""
-
-    architecture = MODEL_ARCHITECTURE.get(dataset_name, "unet")
-
-    if architecture == "dofa":
-        wavelengths = DOFA_WAVELENGTHS[dataset_name]
-
-        if len(wavelengths) != in_channels:
-            raise ValueError(
-                f"DOFA_WAVELENGTHS['{dataset_name}'] has {len(wavelengths)} entries "
-                f"but the dataset has {in_channels} channels -- these must match "
-                "(one wavelength per input channel, in the same order)."
-            )
-
-        model = DOFAUNet(
-            wavelengths=wavelengths,
-            checkpoint_dir=DOFA_CHECKPOINT_DIR,
-            variant=DOFA_VARIANT,
-            out_channels=OUTPUT_CHANNELS,
-            freeze_backbone=True
-        ).to(DEVICE)
-
-        optimizer = torch.optim.Adam(
-            model.differential_param_groups(decoder_lr=LEARNING_RATE, backbone_lr=DOFA_BACKBONE_LR),
-            weight_decay=WEIGHT_DECAY
-        )
-
-        print(
-            f"  Using DOFAUNet ({DOFA_VARIANT}, wavelengths={wavelengths}); backbone "
-            f"frozen for the first {DOFA_FREEZE_EPOCHS} epoch(s), then last "
-            f"{DOFA_UNFREEZE_BLOCKS} block(s) unfrozen at lr={DOFA_BACKBONE_LR}"
-        )
-
-        return model, optimizer
-
-    model = UNet(
+def build_model_and_optimizer(in_channels):
+    # Builds the UNet (ResNet50 encoder) + optimizer, encoder frozen for the warm-up phase.
+    model = LandslideUNet(
         in_channels=in_channels,
         out_channels=OUTPUT_CHANNELS,
-        encoder_channels=ENCODER_CHANNELS,
-        decoder_channels=DECODER_CHANNELS,
-        bottleneck_channels=BOTTLENECK_CHANNELS
+        encoder_name=ENCODER,
+        encoder_weights=ENCODER_WEIGHTS,
+        freeze_encoder=True
     ).to(DEVICE)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.Adam(
+        model.differential_param_groups(decoder_lr=LEARNING_RATE, encoder_lr=ENCODER_LR),
+        weight_decay=WEIGHT_DECAY
+    )
+
+    print(
+        f"  Using UNet (encoder={ENCODER}, weights={ENCODER_WEIGHTS}); "
+        f"encoder frozen for the first {FREEZE_ENCODER_EPOCHS} epoch(s), "
+        f"then fully unfrozen at lr={ENCODER_LR}"
+    )
 
     return model, optimizer
 
 
-def maybe_unfreeze_pretrained_backbone(model, optimizer, epoch):
-    """No-op for a plain UNet. For a DOFAUNet, once `epoch` crosses
-    DOFA_FREEZE_EPOCHS, unfreezes DOFA_UNFREEZE_BLOCKS backbone blocks
-    and adds their parameters to the optimizer at DOFA_BACKBONE_LR.
-    Only fires once, on the exact epoch after the freeze period ends."""
-
-    if not hasattr(model, "unfreeze_backbone_blocks"):
+def maybe_unfreeze_encoder(model, epoch):
+    # Unfreezes the encoder once, on the epoch right after the warm-up period ends.
+    if epoch != FREEZE_ENCODER_EPOCHS + 1:
         return
 
-    if epoch != DOFA_FREEZE_EPOCHS + 1:
-        return
-
-    model.unfreeze_backbone_blocks(DOFA_UNFREEZE_BLOCKS)
-    backbone_lr = DOFA_BACKBONE_LR
-
-    newly_trainable = [parameter for parameter in model.backbone.parameters() if parameter.requires_grad]
-
-    if newly_trainable:
-        optimizer.add_param_group({"params": newly_trainable, "lr": backbone_lr})
+    model.unfreeze_encoder()
 
 
 def build_run_metadata(dataset_name, in_channels, pos_weight, positive_ratio):
-    """Captures every hyperparameter/setting that actually shaped this
-    training run, so history.json and confusion_matrix.json are each
-    self-documenting -- reproducible from the JSON file alone, without
-    having to cross-reference config.py (which may have since changed
-    for other runs)."""
-
-    architecture = MODEL_ARCHITECTURE.get(dataset_name, "unet")
-
-    metadata = {
+    # Captures every setting that shaped this run, so history.json / confusion_matrix.json
+    # are self-documenting and reproducible without cross-referencing config.py later.
+    return {
         "dataset": dataset_name,
         "in_channels": in_channels,
         "output_channels": OUTPUT_CHANNELS,
@@ -342,28 +284,17 @@ def build_run_metadata(dataset_name, in_channels, pos_weight, positive_ratio):
         "max_pos_weight": MAX_POS_WEIGHT,
         "positive_pixel_ratio": positive_ratio,
         "pos_weight_used": pos_weight,
-        "encoder_channels": ENCODER_CHANNELS,
-        "decoder_channels": DECODER_CHANNELS,
-        "bottleneck_channels": BOTTLENECK_CHANNELS,
         "random_seed": RANDOM_SEED,
         "random_sample_percentage": RANDOM_SAMPLE_PERCENTAGE,
         "augment_train": AUGMENT_TRAIN,
         "fit_sites": FIT_SITES,
         "val_sites": VAL_SITES,
         "test_sites": TEST_SITES,
-        "model_architecture": architecture
+        "encoder": ENCODER,
+        "encoder_weights": ENCODER_WEIGHTS,
+        "freeze_encoder_epochs": FREEZE_ENCODER_EPOCHS,
+        "encoder_lr": ENCODER_LR
     }
-
-    if architecture == "dofa":
-        metadata.update({
-            "dofa_variant": DOFA_VARIANT,
-            "dofa_wavelengths": DOFA_WAVELENGTHS[dataset_name],
-            "dofa_freeze_epochs": DOFA_FREEZE_EPOCHS,
-            "dofa_unfreeze_blocks": DOFA_UNFREEZE_BLOCKS,
-            "dofa_backbone_lr": DOFA_BACKBONE_LR
-        })
-
-    return metadata
 
 
 def train_on_dataset(dataset_name, in_channels):
@@ -380,7 +311,10 @@ def train_on_dataset(dataset_name, in_channels):
 
     print(f"  Positive pixel ratio: {positive_ratio:.5f} -> pos_weight: {pos_weight:.2f}")
 
-    model, optimizer = build_model_and_optimizer(dataset_name, in_channels)
+    model, optimizer = build_model_and_optimizer(in_channels)
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=5)
+    scaler = torch.amp.GradScaler("cuda", enabled=(DEVICE == "cuda"))
 
     criterion = BCEDiceLoss(pos_weight=pos_weight).to(DEVICE)
 
@@ -389,18 +323,21 @@ def train_on_dataset(dataset_name, in_channels):
 
     best_val_iou = -1.0
     best_epoch = -1
+    epochs_without_improvement = 0
     history = []
 
     for epoch in range(1, EPOCHS + 1):
         start_time = time.time()
 
-        maybe_unfreeze_pretrained_backbone(model, optimizer, epoch)
+        maybe_unfreeze_encoder(model, epoch)
 
         train_desc = f"[{dataset_name}] Epoch {epoch}/{EPOCHS} (train)"
         val_desc = f"[{dataset_name}] Epoch {epoch}/{EPOCHS} (val)"
 
-        train_loss, train_metrics = run_epoch(model, train_loader, criterion, optimizer, desc=train_desc)
+        train_loss, train_metrics = run_epoch(model, train_loader, criterion, optimizer, scaler=scaler, desc=train_desc)
         val_loss, val_metrics = run_epoch(model, val_loader, criterion, desc=val_desc)
+
+        scheduler.step(val_metrics["iou"])
 
         elapsed = time.time() - start_time
 
@@ -409,7 +346,8 @@ def train_on_dataset(dataset_name, in_channels):
             f"train_loss={train_loss:.4f} train_iou={train_metrics['iou']:.4f} "
             f"train_acc={train_metrics['accuracy']:.4f} | "
             f"val_loss={val_loss:.4f} val_iou={val_metrics['iou']:.4f} "
-            f"val_acc={val_metrics['accuracy']:.4f}"
+            f"val_acc={val_metrics['accuracy']:.4f} | "
+            f"lr={optimizer.param_groups[0]['lr']:.2e}"
         )
 
         history.append({
@@ -420,11 +358,26 @@ def train_on_dataset(dataset_name, in_channels):
             **{f"val_{key}": value for key, value in val_metrics.items()}
         })
 
+        # Rewritten after every epoch (not just at the end) so a crash or
+        # manual kill mid-run still leaves a complete CSV of every epoch
+        # trained so far, instead of losing the whole run's history.
+        save_history_csv(history, os.path.join(output_dir, "history.csv"))
+
         if val_metrics["iou"] > best_val_iou:
             best_val_iou = val_metrics["iou"]
             best_epoch = epoch
+            epochs_without_improvement = 0
             torch.save(model.state_dict(), os.path.join(output_dir, "best_model.pth"))
             print(f"  -> new best val IoU: {best_val_iou:.4f}, checkpoint saved")
+        else:
+            epochs_without_improvement += 1
+
+            if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+                print(
+                    f"  -> no val IoU improvement for {EARLY_STOPPING_PATIENCE} epochs, "
+                    f"stopping early at epoch {epoch} (best was epoch {best_epoch}, iou={best_val_iou:.4f})"
+                )
+                break
 
     torch.save(model.state_dict(), os.path.join(output_dir, "final_model.pth"))
 

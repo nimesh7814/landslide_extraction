@@ -4,14 +4,8 @@ import torch.nn.functional as F
 
 
 class BCEDiceLoss(nn.Module):
-    """Combines BCEWithLogits with a soft Dice loss. The Dice term and the
-    optional pos_weight both help counteract class imbalance, which is
-    severe here since landslide area covers only a small fraction of
-    most tiles.
-
-    pos_weight > 1 tells the BCE term to penalize missed positive
-    (landslide) pixels more heavily than missed negative pixels.
-    """
+    # Combines BCEWithLogits with a soft Dice loss; both the Dice term and pos_weight (>1 penalizes
+    # missed landslide pixels more) counteract the severe class imbalance in landslide tiles.
 
     def __init__(self, bce_weight=0.5, smooth=1.0, pos_weight=None):
         super().__init__()

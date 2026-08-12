@@ -1,6 +1,7 @@
 import os
 import glob
 import random
+import time
 
 import numpy as np
 import cv2
@@ -24,9 +25,7 @@ def _site_prefixes(sites):
 
 
 def list_tiles(dataset_name, sites):
-    """Return a sorted list of (image_path, mask_path) tuples for a given
-    dataset variant, restricted to the given site numbers."""
-
+    # Returns a sorted list of (image_path, mask_path) tuples, restricted to the given site numbers.
     img_dir = os.path.join(DATASET_DIR, dataset_name, "images")
     mask_dir = os.path.join(DATASET_DIR, dataset_name, "masks")
 
@@ -54,12 +53,8 @@ def list_tiles(dataset_name, sites):
 
 
 def subsample_pairs(pairs, percentage=RANDOM_SAMPLE_PERCENTAGE, seed=RANDOM_SEED):
-    """Optionally shrinks a list of (image, mask) pairs down to the
-    given percentage (deterministic, via `seed`). Used to reduce the
-    amount of training data for quick experiments -- leave at 1.0 to
-    use every pair as-is. Site-level train/validation splitting is
-    handled separately, in config.py (FIT_SITES / VAL_SITES)."""
-
+    # Deterministically shrinks (image, mask) pairs to `percentage`, for quick experiments;
+    # leave at 1.0 to use every pair. Train/validation splitting is separate (config.py FIT/VAL_SITES).
     if percentage >= 1.0:
         return pairs
 
@@ -74,9 +69,7 @@ def subsample_pairs(pairs, percentage=RANDOM_SAMPLE_PERCENTAGE, seed=RANDOM_SEED
 
 
 def estimate_positive_ratio(pairs, max_samples=200, seed=RANDOM_SEED):
-    """Estimates the fraction of positive (landslide) pixels by scanning
-    a sample of masks, used to weight the loss against class imbalance."""
-
+    # Estimates the fraction of positive (landslide) pixels from a mask sample, to weight the loss.
     rng = random.Random(seed)
 
     sample = pairs if len(pairs) <= max_samples else rng.sample(pairs, max_samples)
@@ -85,7 +78,7 @@ def estimate_positive_ratio(pairs, max_samples=200, seed=RANDOM_SEED):
     total_pixels = 0
 
     for _, mask_path in sample:
-        mask = np.load(mask_path)
+        mask = _load_npy_with_retry(mask_path)
         positive_pixels += int((mask > 0).sum())
         total_pixels += mask.size
 
@@ -96,9 +89,7 @@ def estimate_positive_ratio(pairs, max_samples=200, seed=RANDOM_SEED):
 
 
 def _random_brightness(image):
-    """Scales pixel intensities by a random factor to simulate darker or
-    brighter conditions. Image is expected to be normalized to [0, 1]."""
-
+    # Scales pixel intensities (expected normalized to [0, 1]) by a random factor.
     factor = random.uniform(*AUGMENT_BRIGHTNESS_RANGE)
 
     image = image * factor
@@ -107,9 +98,7 @@ def _random_brightness(image):
 
 
 def _random_blur(image):
-    """Applies a light Gaussian blur to each channel independently to
-    simulate slightly out-of-focus or lower-resolution imagery."""
-
+    # Applies a light Gaussian blur to each channel independently.
     sigma = random.uniform(*AUGMENT_BLUR_SIGMA_RANGE)
 
     blurred = np.empty_like(image)
@@ -125,9 +114,30 @@ def _random_blur(image):
     return blurred
 
 
+def _load_npy_with_retry(path, max_attempts=4, base_delay=0.5):
+    # Loads a .npy file, retrying with backoff on transient OS read failures (e.g. a cloud-sync
+    # client like OneDrive evicting a placeholder file); re-raises if every attempt fails.
+    last_error = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return np.load(path)
+        except (OSError, PermissionError) as error:
+            last_error = error
+
+            if attempt == max_attempts:
+                break
+
+            delay = base_delay * (2 ** (attempt - 1))
+            print(f"  Warning: transient read failure on {path} (attempt {attempt}/{max_attempts}): "
+                  f"{error} -- retrying in {delay:.1f}s")
+            time.sleep(delay)
+
+    raise last_error
+
+
 class LandslideDataset(Dataset):
-    """Loads pre-tiled (image, mask) .npy pairs produced by
-    1_create_train_dataset.py."""
+    # Loads pre-tiled (image, mask) .npy pairs produced by 1_create_train_dataset.py.
 
     def __init__(self, pairs, augment=False):
         self.pairs = pairs
@@ -139,8 +149,8 @@ class LandslideDataset(Dataset):
     def __getitem__(self, index):
         image_path, mask_path = self.pairs[index]
 
-        image = np.load(image_path).astype(np.float32)
-        mask = np.load(mask_path).astype(np.float32)
+        image = _load_npy_with_retry(image_path).astype(np.float32)
+        mask = _load_npy_with_retry(mask_path).astype(np.float32)
 
         mask = mask / 255.0
 
